@@ -726,7 +726,9 @@ export async function createController({
     pair: (id) =>
       serial(async () => {
         const row = state.rows.find((r) => r.id === id);
-        if (!row || row.state !== "running") throw new Error("Resume sandbox first");
+        // Clients pair as soon as the guest's server is up, a moment before its thread exists.
+        if (!row || !(row.state === "running" || (row.state === "starting" && row.bootstrapped)))
+          throw new Error("Resume sandbox first");
         const result = JSON.parse(
           await (await getDriver(row)).exec(row.ref, pairingScript(profile(row.profile), row.url)),
         );
