@@ -15501,6 +15501,46 @@ function policy(input = {}) {
 	return result;
 }
 const SETTLED_GRACE_MS = 12e4;
+/** Idle windows offered per sandbox, in minutes. */
+const idleChoices = Object.freeze([
+	10,
+	30,
+	60,
+	240,
+	720,
+	1440
+]);
+/** The policy as it applies to one sandbox: its own idle window, and a lifetime that fits it. */
+function effective(p, row) {
+	const idleMinutes = row.idleMinutes ?? p.idleMinutes;
+	return {
+		...p,
+		idleMinutes,
+		continuousMinutes: Math.max(p.continuousMinutes, idleMinutes * 2)
+	};
+}
+/** When a running sandbox will stop if nothing changes, and why; null while it is working. */
+function outlook(row, now, p) {
+	const activity = row.activity;
+	if (row.state !== "running" || !activity) return null;
+	if (row.keepAwakeUntil > now) return {
+		reason: "awake",
+		at: row.keepAwakeUntil
+	};
+	if (activity.closed) return {
+		reason: "settled",
+		at: row.startedAt + SETTLED_GRACE_MS
+	};
+	if (activity.active) return null;
+	if (activity.waiting) return {
+		reason: "waiting",
+		at: (row.waitingSince ?? now) + p.waitingMinutes * 6e4
+	};
+	return {
+		reason: "idle",
+		at: Math.max(row.lastActivity, activity.lastActivity ?? 0) + p.idleMinutes * 6e4
+	};
+}
 function decide(row, activity, now, p) {
 	if (row.desired !== "running") return row.desired;
 	if (now >= row.startedAt + p.continuousMinutes * 6e4) return "stopped";
@@ -16002,14 +16042,14 @@ async function createController({ directory, secrets, source, changed = () => {}
 					row.activity = activity;
 					row.lastThreadDeleted = activity.threads?.length === 0;
 				}
-				if (decide(row, activity, now(), state.policy) === "stopped") {
+				if (decide(row, activity, now(), effective(state.policy, row)) === "stopped") {
 					row.desired = "stopped";
 					await save();
 					await stop(row, d);
 					return;
 				}
 				if (activity) {
-					const until = deadline(row, activity, now(), state.policy);
+					const until = deadline(row, activity, now(), effective(state.policy, row));
 					if (!row.deadline || until < row.deadline - 3e4 || row.deadline - now() < (until - now()) / 2) {
 						await d.setDeadline(row.ref, Math.ceil((until - now()) / 1e3));
 						row.deadline = until;
@@ -16187,6 +16227,12 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (action === "keep-awake") {
 				if (!Number.isFinite(input.hours) || input.hours < 0 || input.hours > 24) throw new Error("Keep awake must be 0–24 hours");
 				row.keepAwakeUntil = now() + input.hours * 36e5;
+			} else if (action === "idle") {
+				const current = row.idleMinutes ?? state.policy.idleMinutes;
+				const minutes = input.minutes === void 0 || input.minutes === "" ? idleChoices[(idleChoices.indexOf(current) + 1) % idleChoices.length] : Number(input.minutes);
+				if (!Number.isFinite(minutes) || minutes < 1 || minutes > 10080) throw new Error("Idle stop must be between 1 minute and 7 days");
+				row.idleMinutes = minutes;
+				row.lastActivity = now();
 			} else if (action === "pin") row.pinned = input.pinned === true;
 			else if ([
 				"running",
@@ -16498,6 +16544,40 @@ function launchSteps(row) {
 		...index === active && (row.error || detail) ? { detail: row.error ?? detail } : {},
 		actions: []
 	}));
+}
+const span = (minutes) => minutes >= 120 ? `${Math.round(minutes / 60)} h` : minutes >= 60 ? "1 h" : `${minutes} min`;
+/** The sandbox's row on its thread: state, when it will stop, and the controls for both. */
+function sandboxStatus(row, policy, time) {
+	const mine = effective(policy, row);
+	const next = outlook(row, time, mine);
+	const left = next ? span(Math.max(1, Math.ceil((next.at - time) / 6e4))) : null;
+	const label = !next ? `Sandbox ${row.state}` : next.reason === "idle" ? `Sandbox idle · stops in ${left}` : next.reason === "waiting" ? `Sandbox waiting for you · stops in ${left}` : next.reason === "settled" ? `Sandbox settled · stops in ${left}` : `Sandbox kept awake for ${left}`;
+	const options = [.../* @__PURE__ */ new Set([...idleChoices, mine.idleMinutes])].sort((a, b) => a - b);
+	return {
+		id: row.id.replace(/^[0-9]/, "s$&"),
+		kind: "status",
+		environmentId: row.environmentId,
+		tone: tone(row.state),
+		label,
+		detail: row.error ?? `Stops after ${span(mine.idleMinutes)} without activity, or once its threads are settled. Using the thread starts it again.`,
+		actions: row.state === "deleted" ? [] : [{
+			...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
+				id: row.id,
+				state: row.state === "stopped" ? "running" : "stopped"
+			}),
+			...row.state === "stopped" ? {} : { confirm: "Stop the sandbox after retaining its thread history?" }
+		}, {
+			...action("idle", "Idle stop", "idle", { id: row.id }),
+			choice: {
+				name: "minutes",
+				value: String(mine.idleMinutes),
+				options: options.map((minutes) => ({
+					label: span(minutes),
+					value: String(minutes)
+				}))
+			}
+		}]
+	};
 }
 const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 6e4))} min ago`;
 function quoteRows(state, time = Date.now()) {
@@ -16854,6 +16934,7 @@ var plugin_default = {
 					agent: true,
 					permission: "orchestration:read"
 				}),
+				descriptor("idle", "Set how long this sandbox may sit idle", (input) => mutate(() => controller.action(input.id, "idle", input))),
 				descriptor("state", "Stop or resume sandbox", (input) => mutate(() => controller.action(input.id, input.state))),
 				descriptor("awake", "Keep sandbox awake or clear", (input) => mutate(() => controller.action(input.id, "keep-awake", input)), { agent: true }),
 				descriptor("pin", "Pin or unpin sandbox", (input) => mutate(() => controller.action(input.id, "pin", input))),
@@ -16966,21 +17047,7 @@ var plugin_default = {
 					permission: "orchestration:read",
 					read: () => succeed$1({
 						title: "Managed sandboxes",
-						blocks: controller.snapshot().rows.filter((row) => row.environmentId).slice(-100).map((row) => ({
-							id: row.id.replace(/^[0-9]/, "s$&"),
-							kind: "status",
-							environmentId: row.environmentId,
-							tone: tone(row.state),
-							label: `Sandbox ${row.state}`,
-							detail: row.error ?? "Managed sandbox",
-							actions: row.state === "deleted" ? [] : [{
-								...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
-									id: row.id,
-									state: row.state === "stopped" ? "running" : "stopped"
-								}),
-								...row.state === "stopped" ? {} : { confirm: "Stop the sandbox after retaining its thread history?" }
-							}]
-						}))
+						blocks: controller.snapshot().rows.filter((row) => row.environmentId).slice(-100).map((row) => sandboxStatus(row, controller.snapshot().policy, Date.now()))
 					})
 				},
 				{

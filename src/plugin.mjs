@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { createController } from "./controller.mjs";
-import { tone } from "./policy.mjs";
+import { effective, idleChoices, outlook, tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
 import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
 import { createEnvironments } from "./environments.mjs";
@@ -92,6 +92,59 @@ function launchSteps(row) {
     ...(index === active && (row.error || detail) ? { detail: row.error ?? detail } : {}),
     actions: [],
   }));
+}
+const span = (minutes) =>
+  minutes >= 120 ? `${Math.round(minutes / 60)} h` : minutes >= 60 ? "1 h" : `${minutes} min`;
+/** The sandbox's row on its thread: state, when it will stop, and the controls for both. */
+function sandboxStatus(row, policy, time) {
+  const mine = effective(policy, row);
+  const next = outlook(row, time, mine);
+  const left = next ? span(Math.max(1, Math.ceil((next.at - time) / 60000))) : null;
+  const label = !next
+    ? `Sandbox ${row.state}`
+    : next.reason === "idle"
+      ? `Sandbox idle · stops in ${left}`
+      : next.reason === "waiting"
+        ? `Sandbox waiting for you · stops in ${left}`
+        : next.reason === "settled"
+          ? `Sandbox settled · stops in ${left}`
+          : `Sandbox kept awake for ${left}`;
+  const options = [...new Set([...idleChoices, mine.idleMinutes])].sort((a, b) => a - b);
+  return {
+    id: row.id.replace(/^[0-9]/, "s$&"),
+    kind: "status",
+    environmentId: row.environmentId,
+    tone: tone(row.state),
+    label,
+    detail:
+      row.error ??
+      `Stops after ${span(mine.idleMinutes)} without activity, or once its threads are settled. Using the thread starts it again.`,
+    actions:
+      row.state === "deleted"
+        ? []
+        : [
+            {
+              ...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
+                id: row.id,
+                state: row.state === "stopped" ? "running" : "stopped",
+              }),
+              ...(row.state === "stopped"
+                ? {}
+                : { confirm: "Stop the sandbox after retaining its thread history?" }),
+            },
+            {
+              ...action("idle", "Idle stop", "idle", { id: row.id }),
+              choice: {
+                name: "minutes",
+                value: String(mine.idleMinutes),
+                options: options.map((minutes) => ({
+                  label: span(minutes),
+                  value: String(minutes),
+                })),
+              },
+            },
+          ],
+  };
 }
 const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 60000))} min ago`;
 // One row per quoted profile: the last accepted quote, its age and validity, and any failed refresh.
@@ -522,6 +575,9 @@ export default {
                 .rows.map(({ id, state, title, profile }) => ({ id, state, title, profile })),
             { agent: true, permission: "orchestration:read" },
           ),
+          descriptor("idle", "Set how long this sandbox may sit idle", (input) =>
+            mutate(() => controller.action(input.id, "idle", input)),
+          ),
           descriptor("state", "Stop or resume sandbox", (input) =>
             mutate(() => controller.action(input.id, input.state)),
           ),
@@ -686,35 +742,7 @@ export default {
                   .snapshot()
                   .rows.filter((row) => row.environmentId)
                   .slice(-100)
-                  .map((row) => ({
-                    id: row.id.replace(/^[0-9]/, "s$&"),
-                    kind: "status",
-                    environmentId: row.environmentId,
-                    tone: tone(row.state),
-                    label: `Sandbox ${row.state}`,
-                    detail: row.error ?? "Managed sandbox",
-                    actions:
-                      row.state === "deleted"
-                        ? []
-                        : [
-                            {
-                              ...action(
-                                "state",
-                                row.state === "stopped" ? "Resume" : "Stop",
-                                "state",
-                                {
-                                  id: row.id,
-                                  state: row.state === "stopped" ? "running" : "stopped",
-                                },
-                              ),
-                              ...(row.state === "stopped"
-                                ? {}
-                                : {
-                                    confirm: "Stop the sandbox after retaining its thread history?",
-                                  }),
-                            },
-                          ],
-                  })),
+                  .map((row) => sandboxStatus(row, controller.snapshot().policy, Date.now())),
               }),
           },
           {

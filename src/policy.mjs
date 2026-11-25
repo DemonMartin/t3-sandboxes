@@ -35,6 +35,31 @@ export function policy(input = {}) {
   return result;
 }
 const SETTLED_GRACE_MS = 2 * 60000;
+/** Idle windows offered per sandbox, in minutes. */
+export const idleChoices = Object.freeze([10, 30, 60, 240, 720, 1440]);
+/** The policy as it applies to one sandbox: its own idle window, and a lifetime that fits it. */
+export function effective(p, row) {
+  const idleMinutes = row.idleMinutes ?? p.idleMinutes;
+  return {
+    ...p,
+    idleMinutes,
+    continuousMinutes: Math.max(p.continuousMinutes, idleMinutes * 2),
+  };
+}
+/** When a running sandbox will stop if nothing changes, and why; null while it is working. */
+export function outlook(row, now, p) {
+  const activity = row.activity;
+  if (row.state !== "running" || !activity) return null;
+  if (row.keepAwakeUntil > now) return { reason: "awake", at: row.keepAwakeUntil };
+  if (activity.closed) return { reason: "settled", at: row.startedAt + SETTLED_GRACE_MS };
+  if (activity.active) return null;
+  if (activity.waiting)
+    return { reason: "waiting", at: (row.waitingSince ?? now) + p.waitingMinutes * 60000 };
+  return {
+    reason: "idle",
+    at: Math.max(row.lastActivity, activity.lastActivity ?? 0) + p.idleMinutes * 60000,
+  };
+}
 export function decide(row, activity, now, p) {
   if (row.desired !== "running") return row.desired;
   if (now >= row.startedAt + p.continuousMinutes * 60000) return "stopped";

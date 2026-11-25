@@ -63,3 +63,21 @@ test("a settled sandbox stops, after a short grace when it was only just started
   // deleting the last thread is not a pause to look around
   assert.equal(decide(row, { ...settled, threads: [] }, 100 * minute, p), "stopped");
 });
+
+test("a sandbox can have its own idle window, and says when it will stop", async () => {
+  const { decide, effective, outlook } = await import("../src/policy.mjs");
+  const minute = 60000;
+  const p = policy({ idleMinutes: 10, continuousMinutes: 720 });
+  const row = { desired: "running", state: "running", startedAt: 0, lastActivity: 0, idleMinutes: 1440 };
+  const idle = { active: false, waiting: false, closed: false, lastActivity: 0, threads: [{}] };
+  const mine = effective(p, row);
+  assert.equal(mine.idleMinutes, 1440);
+  // a day-long idle window is not cut short by the default lifetime
+  assert.equal(decide(row, idle, 13 * 60 * minute, mine), "running");
+  assert.equal(decide(row, idle, 24 * 60 * minute, mine), "stopped");
+  assert.deepEqual(outlook({ ...row, activity: idle }, 60 * minute, mine), {
+    reason: "idle",
+    at: 1440 * minute,
+  });
+  assert.equal(outlook({ ...row, activity: { ...idle, active: true } }, minute, mine), null);
+});

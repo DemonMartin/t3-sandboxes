@@ -4,7 +4,7 @@ import { randomUUID, randomBytes } from "node:crypto";
 import { atomic, safeUrl, quote } from "./io.mjs";
 import { driver, bootstrap, pairingScript } from "./drivers.mjs";
 import { Guest } from "./mcp.mjs";
-import { policy, decide, deadline } from "./policy.mjs";
+import { policy, decide, deadline, effective, idleChoices } from "./policy.mjs";
 import { usage } from "./billing.mjs";
 import { readQuote, snapshot } from "./pricing.mjs";
 import { workspaceSafetyScript } from "./safety.mjs";
@@ -392,7 +392,7 @@ export async function createController({
           row.activity = activity;
           row.lastThreadDeleted = activity.threads?.length === 0;
         }
-        const action = decide(row, activity, now(), state.policy);
+        const action = decide(row, activity, now(), effective(state.policy, row));
         if (action === "stopped") {
           row.desired = "stopped";
           await save();
@@ -400,7 +400,7 @@ export async function createController({
           return;
         }
         if (activity) {
-          const until = deadline(row, activity, now(), state.policy);
+          const until = deadline(row, activity, now(), effective(state.policy, row));
           if (
             !row.deadline ||
             until < row.deadline - 30000 ||
@@ -596,6 +596,17 @@ export async function createController({
           if (!Number.isFinite(input.hours) || input.hours < 0 || input.hours > 24)
             throw new Error("Keep awake must be 0–24 hours");
           row.keepAwakeUntil = now() + input.hours * 3600000;
+        } else if (action === "idle") {
+          // Without a value (a host that shows this as a plain button) step to the next choice.
+          const current = row.idleMinutes ?? state.policy.idleMinutes;
+          const minutes =
+            input.minutes === undefined || input.minutes === ""
+              ? idleChoices[(idleChoices.indexOf(current) + 1) % idleChoices.length]
+              : Number(input.minutes);
+          if (!Number.isFinite(minutes) || minutes < 1 || minutes > 10080)
+            throw new Error("Idle stop must be between 1 minute and 7 days");
+          row.idleMinutes = minutes;
+          row.lastActivity = now();
         } else if (action === "pin") row.pinned = input.pinned === true;
         else if (["running", "stopped", "deleted"].includes(action)) {
           if (action === "deleted" && input.confirm !== true)
