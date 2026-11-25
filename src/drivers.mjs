@@ -212,7 +212,11 @@ function external(profile, run) {
     progress: (...args) => call("progress", args, 15000),
   };
 }
-export function bootstrap(row, profile) {
+/**
+ * Starts the guest's T3 server and prints a controller token. With `cwd` the checkout is
+ * someone else's job (a driver that prepares it): the server only needs a place to start.
+ */
+export function bootstrap(row, profile, { cwd } = {}) {
   const root = "/home/user/t3-sandbox";
   const q = quote;
   return `set -eu
@@ -222,7 +226,7 @@ printf %s ${q(JSON.stringify({ plugins: [{ id: "sandboxes", path: root + "/plugi
 printf %s ${q(JSON.stringify({ mode: "guest", sandboxId: row.id, controllerUrl: profile.controllerUrl ?? null, key: row.reporterKey }))} > ${root}/home/plugins-guest.json
 chmod 600 ${root}/home/plugins-guest.json
 ${
-  row.workspace
+  cwd || row.workspace
     ? ""
     : `if [ ! -d ${root}/repo/.git ]; then
   git clone -- ${q(row.repository)} ${root}/repo
@@ -230,7 +234,7 @@ ${
   git checkout --detach ${q(row.base)}
 fi`
 }
-cd ${q(row.workspace ?? root + "/repo")}
+cd ${q(cwd ?? row.workspace ?? root + "/repo")}
 # A dedicated image supplies the same plugin host build as the controller.
 ${quote(profile.t3Command ?? "t3")} --version >/dev/null
 if [ ! -f ${root}/server.pid ] || ! kill -0 "$(cat ${root}/server.pid)" 2>/dev/null; then

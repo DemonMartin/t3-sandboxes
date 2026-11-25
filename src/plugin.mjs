@@ -604,6 +604,26 @@ export default {
           descriptor("launch", "Start a sandboxed project thread", (input) =>
             mutate(() => launchSandbox(controller, input)),
           ),
+          descriptor("launch-options", "What a new sandbox can be started with", async (input) => {
+            const { policy, profiles, sizes, defaultSize } = controller.snapshot();
+            if (!policy.autoSandbox || !profiles[0]?.capabilities?.resize || sizes.length < 2)
+              return null;
+            // The project's environment may name its own size; otherwise the default applies.
+            const preferred = await launchProject(input)
+              .then(async (project) => (await environments.get(project.repository)).size)
+              .catch(() => "");
+            return {
+              $t3: "launch-options",
+              options: [
+                {
+                  name: "size",
+                  label: "Sandbox size",
+                  value: sizes.some((size) => size.id === preferred) ? preferred : defaultSize,
+                  choices: sizes.map((size) => ({ label: sizeLabel(size), value: size.id })),
+                },
+              ],
+            };
+          }),
           descriptor("auto-launch", "Start a new chat in its own sandbox", (input) =>
             mutate(() => autoLaunch(controller, input)),
           ),
@@ -690,6 +710,7 @@ export default {
             location: "environment-launcher",
             permission: "environment:maintain",
             autoLaunch: "auto-launch",
+            autoLaunchOptions: "launch-options",
             read: (input = {}) =>
               call("launcher", async () => {
                 const state = controller.snapshot();
@@ -798,7 +819,8 @@ export default {
                     // Clients show this as the environment's name ("Starting Sandbox").
                     label: "Sandbox",
                     url: row.url,
-                    state: row.state,
+                    // Reachable as soon as its server is up, a moment before its thread is.
+                    state: row.state === "starting" && row.bootstrapped ? "running" : row.state,
                     ...(row.threadId ? { threadId: row.threadId } : {}),
                     launchRequestId: row.id,
                     connect: action("connect", "Connect", "pair", { id: row.id }),

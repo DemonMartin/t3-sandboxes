@@ -314,11 +314,20 @@ export async function createController({
           await save();
           const key = (await secrets.get(`reporter-${row.id}`)) ?? randomBytes(32).toString("hex");
           await secrets.set(`reporter-${row.id}`, key);
+          await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
+          await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
+          let token;
           if (row.driverCheckout) {
             // The driver owns the checkout: one sandbox is one thread, so it works in the
-            // repository itself on its own branch instead of a second worktree.
+            // repository itself on its own branch instead of a second worktree. The guest's
+            // server does not need the checkout to start, so both happen at once.
             row.stage = "Preparing environment";
             await save();
+            const booting = d.exec(
+              row.ref,
+              bootstrap({ ...row, reporterKey: key }, p, { cwd: "/home/user/t3-sandbox" }),
+            );
+            booting.catch(() => {});
             const prepared = await d.prepare(row.ref, {
               repository: row.repository,
               base: row.base,
@@ -327,12 +336,13 @@ export async function createController({
             });
             row.workspace = prepared.workspace;
             row.setup = prepared.setup;
+            row.stage = "Bootstrapping T3";
             await save();
+            token = await booting;
+          } else {
+            row.stage = "Bootstrapping T3";
+            token = await d.exec(row.ref, bootstrap({ ...row, reporterKey: key }, p));
           }
-          await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
-          await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
-          row.stage = "Bootstrapping T3";
-          const token = await d.exec(row.ref, bootstrap({ ...row, reporterKey: key }, p));
           await secrets.set(`guest-${row.id}`, String(token).trim());
           row.url = p.url ? safeUrl(p.url.replaceAll("{id}", row.ref)) : await d.expose(row.ref);
           row.bootstrapped = true;
@@ -345,6 +355,17 @@ export async function createController({
         const g = await getGuest(row);
         row.stage = "Starting thread";
         if (!row.threadId) {
+          if (!row.environmentId) {
+            // Tell clients where the sandbox is before its thread exists: they connect while
+            // the thread is being launched instead of after.
+            try {
+              const early = await g.activity();
+              if (early.environmentId) {
+                row.environmentId = early.environmentId;
+                await save();
+              }
+            } catch {}
+          }
           const projects = await g.call("t3_project_list", { limit: 100 });
           const workspaceRoot = row.workspace ?? DEFAULT_WORKSPACE;
           // The guest project carries the originating project's name: clients merge both

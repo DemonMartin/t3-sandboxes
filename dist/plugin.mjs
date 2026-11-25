@@ -15333,7 +15333,11 @@ function external(profile, run) {
 		progress: (...args) => call("progress", args, 15e3)
 	};
 }
-function bootstrap(row, profile) {
+/**
+* Starts the guest's T3 server and prints a controller token. With `cwd` the checkout is
+* someone else's job (a driver that prepares it): the server only needs a place to start.
+*/
+function bootstrap(row, profile, { cwd } = {}) {
 	const root = "/home/user/t3-sandbox";
 	const q = quote;
 	return `set -eu
@@ -15355,12 +15359,12 @@ printf %s ${q(JSON.stringify({
 		key: row.reporterKey
 	}))} > ${root}/home/plugins-guest.json
 chmod 600 ${root}/home/plugins-guest.json
-${row.workspace ? "" : `if [ ! -d ${root}/repo/.git ]; then
+${cwd || row.workspace ? "" : `if [ ! -d ${root}/repo/.git ]; then
   git clone -- ${q(row.repository)} ${root}/repo
   cd ${root}/repo
   git checkout --detach ${q(row.base)}
 fi`}
-cd ${q(row.workspace ?? root + "/repo")}
+cd ${q(cwd ?? row.workspace ?? root + "/repo")}
 # A dedicated image supplies the same plugin host build as the controller.
 ${quote(profile.t3Command ?? "t3")} --version >/dev/null
 if [ ! -f ${root}/server.pid ] || ! kill -0 "$(cat ${root}/server.pid)" 2>/dev/null; then
@@ -16016,9 +16020,17 @@ async function createController({ directory, secrets, source, changed = () => {}
 					await save();
 					const key = await secrets.get(`reporter-${row.id}`) ?? randomBytes(32).toString("hex");
 					await secrets.set(`reporter-${row.id}`, key);
+					await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
+					await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
+					let token;
 					if (row.driverCheckout) {
 						row.stage = "Preparing environment";
 						await save();
+						const booting = d.exec(row.ref, bootstrap({
+							...row,
+							reporterKey: key
+						}, p, { cwd: "/home/user/t3-sandbox" }));
+						booting.catch(() => {});
 						const prepared = await d.prepare(row.ref, {
 							repository: row.repository,
 							base: row.base,
@@ -16027,15 +16039,16 @@ async function createController({ directory, secrets, source, changed = () => {}
 						});
 						row.workspace = prepared.workspace;
 						row.setup = prepared.setup;
+						row.stage = "Bootstrapping T3";
 						await save();
+						token = await booting;
+					} else {
+						row.stage = "Bootstrapping T3";
+						token = await d.exec(row.ref, bootstrap({
+							...row,
+							reporterKey: key
+						}, p));
 					}
-					await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
-					await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
-					row.stage = "Bootstrapping T3";
-					const token = await d.exec(row.ref, bootstrap({
-						...row,
-						reporterKey: key
-					}, p));
 					await secrets.set(`guest-${row.id}`, String(token).trim());
 					row.url = p.url ? safeUrl(p.url.replaceAll("{id}", row.ref)) : await d.expose(row.ref);
 					row.bootstrapped = true;
@@ -16048,6 +16061,13 @@ async function createController({ directory, secrets, source, changed = () => {}
 				const g = await getGuest(row);
 				row.stage = "Starting thread";
 				if (!row.threadId) {
+					if (!row.environmentId) try {
+						const early = await g.activity();
+						if (early.environmentId) {
+							row.environmentId = early.environmentId;
+							await save();
+						}
+					} catch {}
 					const projects = await g.call("t3_project_list", { limit: 100 });
 					const workspaceRoot = row.workspace ?? DEFAULT_WORKSPACE;
 					const project = projects.projects.find((x) => x.workspaceRoot === workspaceRoot) ?? await g.call("t3_project_create", {
@@ -17053,6 +17073,23 @@ var plugin_default = {
 			changes: fromPubSub(changes),
 			commands: [
 				descriptor("launch", "Start a sandboxed project thread", (input) => mutate(() => launchSandbox(controller, input))),
+				descriptor("launch-options", "What a new sandbox can be started with", async (input) => {
+					const { policy, profiles, sizes, defaultSize } = controller.snapshot();
+					if (!policy.autoSandbox || !profiles[0]?.capabilities?.resize || sizes.length < 2) return null;
+					const preferred = await launchProject(input).then(async (project) => (await environments.get(project.repository)).size).catch(() => "");
+					return {
+						$t3: "launch-options",
+						options: [{
+							name: "size",
+							label: "Sandbox size",
+							value: sizes.some((size) => size.id === preferred) ? preferred : defaultSize,
+							choices: sizes.map((size) => ({
+								label: sizeLabel(size),
+								value: size.id
+							}))
+						}]
+					};
+				}),
 				descriptor("auto-launch", "Start a new chat in its own sandbox", (input) => mutate(() => autoLaunch(controller, input))),
 				descriptor("environment-save", "Save sandbox environment", async (input) => {
 					await environments.set(await projectRemote(input.projectId), {
@@ -17111,6 +17148,7 @@ var plugin_default = {
 					location: "environment-launcher",
 					permission: "environment:maintain",
 					autoLaunch: "auto-launch",
+					autoLaunchOptions: "launch-options",
 					read: (input = {}) => call("launcher", async () => {
 						const state = controller.snapshot();
 						const row = state.rows.find((row) => row.id === input.requestId);
@@ -17196,7 +17234,7 @@ var plugin_default = {
 							environmentId: row.environmentId,
 							label: "Sandbox",
 							url: row.url,
-							state: row.state,
+							state: row.state === "starting" && row.bootstrapped ? "running" : row.state,
 							...row.threadId ? { threadId: row.threadId } : {},
 							launchRequestId: row.id,
 							connect: action("connect", "Connect", "pair", { id: row.id }),
