@@ -3190,7 +3190,7 @@ const isReference = (u) => !!u[ReferenceTypeId];
 * @category constructors
 * @since 2.0.0
 */
-const empty$1 = () => emptyContext;
+const empty$2 = () => emptyContext;
 const emptyContext = /*#__PURE__*/ makeUnsafe$5(/*#__PURE__*/ new Map());
 /**
 * Creates a new `Context` with a single service associated to the key.
@@ -4140,7 +4140,7 @@ const isReadonlyArrayNonEmpty = isArrayNonEmpty$1;
 * @category constructors
 * @since 2.0.0
 */
-const empty = () => [];
+const empty$1 = () => [];
 /**
 * Transforms each element using a function, returning a new array.
 *
@@ -4781,7 +4781,7 @@ var FiberImpl = class {
 		}
 		this._stack.length = 0;
 		this._children = void 0;
-		this.context = empty$1();
+		this.context = empty$2();
 		const cache = this.cache;
 		if (cache.span !== void 0 || cache.stackFrame !== void 0) this.cache = {
 			...cache,
@@ -4958,7 +4958,7 @@ const fiberInterruptAs = /*#__PURE__*/ dual((args) => hasProperty(args[0], Fiber
 /** @internal */
 const fiberInterruptAll = (fibers) => withFiber$1((parent) => {
 	const annotations = fiberStackAnnotations(parent);
-	let fiberArr = empty();
+	let fiberArr = empty$1();
 	for (const fiber of fibers) {
 		fiber.interruptUnsafe(parent.id, annotations);
 		fiberArr.push(fiber);
@@ -5804,7 +5804,7 @@ const runForkWith = (context) => (effect, options) => {
 	return fiber;
 };
 /** @internal */
-const runFork$1 = /*#__PURE__*/ runForkWith(/*#__PURE__*/ empty$1());
+const runFork$1 = /*#__PURE__*/ runForkWith(/*#__PURE__*/ empty$2());
 /** @internal */
 const runPromiseExitWith = (context) => {
 	const runFork = runForkWith(context);
@@ -5824,7 +5824,7 @@ const runPromiseWith = (context) => {
 	});
 };
 /** @internal */
-const runPromise$1 = /*#__PURE__*/ runPromiseWith(/*#__PURE__*/ empty$1());
+const runPromise$1 = /*#__PURE__*/ runPromiseWith(/*#__PURE__*/ empty$2());
 /** @internal */
 const runSyncExitWith = (context) => {
 	const runFork = runForkWith(context);
@@ -5837,7 +5837,7 @@ const runSyncExitWith = (context) => {
 	};
 };
 /** @internal */
-const runSyncExit$1 = /*#__PURE__*/ runSyncExitWith(/*#__PURE__*/ empty$1());
+const runSyncExit$1 = /*#__PURE__*/ runSyncExitWith(/*#__PURE__*/ empty$2());
 const succeedTrue = /*#__PURE__*/ succeed$3(true);
 const succeedFalse = /*#__PURE__*/ succeed$3(false);
 var Latch = class {
@@ -10886,7 +10886,7 @@ const Objects = class extends ASTNodeImpl {
 					}
 				}
 				else if (parseIndexes) {
-					const keyPairs = empty();
+					const keyPairs = empty$1();
 					for (let i = 0; i < indexCount; i++) {
 						const index = indexes[i];
 						const keys = indexKeys?.[i] ?? (index.is.parameter === string ? Object.keys(record) : getIndexSignatureKeys(record, index.is.parameter, options));
@@ -15279,11 +15279,14 @@ function driver(profile, run = command) {
 	};
 }
 function external(profile, run) {
-	const call = async (operation, input) => {
-		if (profile.executable) return JSON.parse(await run(profile.executable, [], { input: JSON.stringify({
-			operation,
-			input
-		}) }));
+	const call = async (operation, input, timeout) => {
+		if (profile.executable) return JSON.parse(await run(profile.executable, [], {
+			input: JSON.stringify({
+				operation,
+				input
+			}),
+			...timeout ? { timeout } : {}
+		}));
 		const response = await fetch(profile.endpoint, {
 			method: "POST",
 			headers: {
@@ -15315,7 +15318,9 @@ function external(profile, run) {
 			"create",
 			"write",
 			"quote"
-		].map((op) => [op, (...args) => call(op, args)]))
+		].map((op) => [op, (...args) => call(op, args)])),
+		prepare: (...args) => call("prepare", args, 36e5),
+		environment: (...args) => call("environment", args)
 	};
 }
 function bootstrap(row, profile) {
@@ -15340,12 +15345,12 @@ printf %s ${q(JSON.stringify({
 		key: row.reporterKey
 	}))} > ${root}/home/plugins-guest.json
 chmod 600 ${root}/home/plugins-guest.json
-if [ ! -d ${root}/repo/.git ]; then
+${row.workspace ? "" : `if [ ! -d ${root}/repo/.git ]; then
   git clone -- ${q(row.repository)} ${root}/repo
   cd ${root}/repo
   git checkout --detach ${q(row.base)}
-fi
-cd ${root}/repo
+fi`}
+cd ${q(row.workspace ?? root + "/repo")}
 # A dedicated image supplies the same plugin host build as the controller.
 ${quote(profile.t3Command ?? "t3")} --version >/dev/null
 if [ ! -f ${root}/server.pid ] || ! kill -0 "$(cat ${root}/server.pid)" 2>/dev/null; then
@@ -15474,14 +15479,16 @@ const defaults = Object.freeze({
 	deleteDays: 7,
 	deleteOnThreadDelete: true,
 	maxRunning: 3,
-	monthlyBudget: 0
+	monthlyBudget: 0,
+	autoSandbox: true
 });
+const booleans = /* @__PURE__ */ new Set(["deleteOnThreadDelete", "autoSandbox"]);
 function policy(input = {}) {
 	const result = {
 		...defaults,
 		...input
 	};
-	for (const [key, value] of Object.entries(result)) if (key === "deleteOnThreadDelete") {
+	for (const [key, value] of Object.entries(result)) if (booleans.has(key)) {
 		if (typeof value !== "boolean") throw new Error(`Invalid policy: ${key}`);
 	} else if (!Object.hasOwn(defaults, key) || !Number.isFinite(value) || value < 0 || value > 525600) throw new Error(`Invalid policy: ${key}`);
 	for (const key of [
@@ -15493,12 +15500,13 @@ function policy(input = {}) {
 	]) if (result[key] < 1) throw new Error(`Invalid policy: ${key}`);
 	return result;
 }
+const SETTLED_GRACE_MS = 12e4;
 function decide(row, activity, now, p) {
 	if (row.desired !== "running") return row.desired;
 	if (now >= row.startedAt + p.continuousMinutes * 6e4) return "stopped";
 	if (row.keepAwakeUntil > now) return "running";
 	if (!activity) return "unknown";
-	if (activity.closed) return "stopped";
+	if (activity.closed) return !activity.threads?.length || now >= row.startedAt + SETTLED_GRACE_MS ? "stopped" : "running";
 	if (activity.active) return "running";
 	if (activity.waiting) return now >= (row.waitingSince ?? now) + p.waitingMinutes * 6e4 ? "stopped" : "running";
 	return now >= Math.max(row.lastActivity, activity.lastActivity ?? 0) + p.idleMinutes * 6e4 ? "stopped" : "running";
@@ -15655,7 +15663,8 @@ function inspect(directory, run) {
 	]) === "0") ? "safe" : "unsafe");
 }
 // src/controller.mjs
-async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
+const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
+async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, environment = async () => ({}), drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
 	await mkdir(directory, {
 		recursive: true,
 		mode: 448
@@ -15784,7 +15793,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 			row.rehomed = false;
 		}
 		try {
-			row.workSafe = paused && await (await getDriver(row)).exec(row.ref, `node -e ${quote(workspaceSafetyScript("/home/user/t3-sandbox/repo"))}`) === "safe";
+			row.workSafe = paused && await (await getDriver(row)).exec(row.ref, `node -e ${quote(workspaceSafetyScript(row.workspace ?? DEFAULT_WORKSPACE))}`) === "safe";
 		} catch {
 			row.workSafe = false;
 		}
@@ -15818,12 +15827,17 @@ async function createController({ directory, secrets, source, changed = () => {}
 					}
 					if (priced.price) row.price = priced.price;
 					row.createAttempted = true;
+					row.driverCheckout = d.capabilities.prepare === true;
 					await save();
 					const made = await d.create({
 						name: row.name,
 						requestId: row.id,
 						ttl: state.policy.unattendedMinutes * 60,
-						...row.choice ? { choice: row.choice } : {}
+						...row.choice ? { choice: row.choice } : {},
+						...row.driverCheckout ? { environment: {
+							repository: row.repository,
+							...await environment(row.repository)
+						} } : {}
 					});
 					if (!made.ref) throw new Error("Provider returned no resource id");
 					row.ref = made.ref;
@@ -15911,6 +15925,19 @@ async function createController({ directory, secrets, source, changed = () => {}
 					await save();
 					const key = await secrets.get(`reporter-${row.id}`) ?? randomBytes(32).toString("hex");
 					await secrets.set(`reporter-${row.id}`, key);
+					if (row.driverCheckout) {
+						row.stage = "Preparing environment";
+						await save();
+						const prepared = await d.prepare(row.ref, {
+							repository: row.repository,
+							base: row.base,
+							branch: `sandbox/${row.id.slice(0, 8)}`,
+							environment: await environment(row.repository)
+						});
+						row.workspace = prepared.workspace;
+						row.setup = prepared.setup;
+						await save();
+					}
 					await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
 					await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
 					row.stage = "Bootstrapping T3";
@@ -15930,18 +15957,21 @@ async function createController({ directory, secrets, source, changed = () => {}
 				const g = await getGuest(row);
 				row.stage = "Starting thread";
 				if (!row.threadId) {
-					const project = (await g.call("t3_project_list", { limit: 100 })).projects.find((x) => x.workspaceRoot === "/home/user/t3-sandbox/repo") ?? await g.call("t3_project_create", {
-						title: row.title,
-						workspaceRoot: "/home/user/t3-sandbox/repo"
+					const projects = await g.call("t3_project_list", { limit: 100 });
+					const workspaceRoot = row.workspace ?? DEFAULT_WORKSPACE;
+					const project = projects.projects.find((x) => x.workspaceRoot === workspaceRoot) ?? await g.call("t3_project_create", {
+						title: row.projectTitle ?? row.title,
+						workspaceRoot
 					});
 					row.threadId = (await g.call("t3_thread_launch", {
 						projectId: project.id,
-						title: row.title,
+						title: row.autoTitle ? "New thread" : row.title,
+						...row.autoTitle ? { generateTitle: true } : {},
 						...row.message ? { message: row.message } : {},
 						...row.modelSelection ? { modelSelection: row.modelSelection } : {},
 						...row.runtimeMode ? { runtimeMode: row.runtimeMode } : {},
 						clientRequestId: row.id,
-						workspaceStrategy: {
+						workspaceStrategy: row.workspace ? { type: "root" } : {
 							type: "worktree",
 							baseRef: row.base,
 							branch: `sandbox/${row.id.slice(0, 8)}`
@@ -16081,6 +16111,16 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (input.token) await secrets.set(`provider-${id}`, input.token);
 			await save();
 		}),
+		/** Snapshot state of a repository's environment, for drivers that keep one. */
+		environmentStatus: async (spec) => {
+			const p = state.profiles[0];
+			if (!p) return null;
+			const d = drivers({
+				...p,
+				token: await secrets.get(`provider-${p.id}`)
+			});
+			return d.capabilities.prepare && d.environment ? d.environment(spec) : null;
+		},
 		setPolicy: (input) => serial(async () => {
 			state.policy = policy(input);
 			await save();
@@ -16105,6 +16145,8 @@ async function createController({ directory, secrets, source, changed = () => {}
 				name: `t3-${state.owner.slice(0, 8)}-${p.id}-${id}`,
 				profile: p.id,
 				title: String(input.title ?? "Sandbox").slice(0, 150),
+				...input.projectTitle ? { projectTitle: String(input.projectTitle).slice(0, 150) } : {},
+				...input.autoTitle === true ? { autoTitle: true } : {},
 				hourlyRate: p.hourlyRate,
 				...quote ? { price: snapshot(quote) } : {},
 				...p.choice ? { choice: p.choice } : {},
@@ -16221,7 +16263,11 @@ async function createController({ directory, secrets, source, changed = () => {}
 				}
 				pending.push(worker);
 			}
-			await Promise.all(pending);
+			let timer;
+			await Promise.race([Promise.all(pending), new Promise((resolve) => {
+				timer = setTimeout(resolve, 5e3);
+			})]);
+			clearTimeout(timer);
 		},
 		close: async () => {
 			await tail;
@@ -16295,6 +16341,89 @@ async function launchSandbox(controller, input) {
 		requestId: input.requestId
 	};
 }
+const git = (directory, ...args) => command("git", [
+	"-C",
+	directory,
+	...args
+]);
+const firstLine = (message) => message.trim().split("\n", 1)[0].replace(/\s+/g, " ").slice(0, 80);
+/**
+* The first send of a new chat, offered to the plugin before the host sends it locally.
+* Returns null to decline (the chat then runs on this machine); throws when a sandbox was
+* wanted but cannot be started, so the message never silently runs unsandboxed.
+*/
+async function autoLaunch(controller, input) {
+	const { policy, profiles, rows } = controller.snapshot();
+	if (!policy.autoSandbox || !profiles.length) return null;
+	if (!/^[a-f0-9-]{36}$/.test(input.requestId ?? "")) throw new Error("Invalid launch request id");
+	if (!rows.some((row) => row.id === input.requestId)) {
+		if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Write a first message to start the sandbox with.");
+		if (input.hasAttachments) throw new Error("A sandbox starts from a text-only first message. Remove the attachments, or switch Run on to this machine.");
+		const project = await launchProject(input).catch(() => {
+			throw new Error("A sandbox needs a Git project with an origin remote. Switch Run on to this machine to work here.");
+		});
+		await git(project.directory, "fetch", "--prune", "origin");
+		const branch = typeof input.branch === "string" && /^[A-Za-z0-9._\/-]+$/.test(input.branch) ? input.branch.replace(/^origin\//, "") : await git(project.directory, "rev-parse", "--abbrev-ref", "HEAD");
+		const base = await git(project.directory, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`).catch(() => "") || await git(project.directory, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD").catch(() => "") || (await git(project.directory, "ls-remote", "origin", "HEAD")).split(/\s/, 1)[0];
+		const modelSelection = typeof input.modelSelection === "string" && input.modelSelection ? JSON.parse(input.modelSelection) : input.modelSelection;
+		await controller.create({
+			...input,
+			...project,
+			base,
+			profile: profiles[0].id,
+			title: firstLine(input.message),
+			autoTitle: true,
+			modelSelection
+		});
+	}
+	return {
+		$t3: "environment-launch",
+		requestId: input.requestId
+	};
+}
+// src/environments.mjs
+/** `https://github.com/Owner/Repo.git` and `git@github.com:owner/repo` name the same environment. */
+function repositoryKey(remote) {
+	return String(remote).trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(":", "/").replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
+}
+const empty = Object.freeze({
+	setup: "",
+	start: "",
+	env: ""
+});
+/**
+* One environment per repository: a setup script (run once, then snapshotted by
+* drivers that can), a start script (run on every sandbox start) and extra
+* environment variables. Kept in the plugin's private data directory.
+*/
+async function createEnvironments(directory) {
+	const file = join(directory, "environments.json");
+	const load = async () => {
+		try {
+			return JSON.parse(await readFile(file, "utf8"));
+		} catch (error) {
+			if (error.code !== "ENOENT") throw error;
+			return {};
+		}
+	};
+	return {
+		get: async (remote) => ({
+			...empty,
+			...(await load())[repositoryKey(remote)]
+		}),
+		async set(remote, input) {
+			const value = Object.fromEntries(Object.keys(empty).map((key) => [key, String(input[key] ?? "").replaceAll("\r\n", "\n")]));
+			for (const line of value.env.split("\n")) {
+				const entry = line.trim();
+				if (entry && !entry.startsWith("#") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(entry)) throw new Error("Environment variables are one KEY=VALUE per line");
+			}
+			await atomic(file, {
+				...await load(),
+				[repositoryKey(remote)]: value
+			});
+		}
+	};
+}
 // src/plugin.mjs
 var PluginError = class extends TaggedError()("PluginError", {
 	operation: String$1,
@@ -16335,6 +16464,41 @@ const descriptor = (id, title, run, { agent = false, permission = "environment:m
 	agent,
 	run: (input) => call(id, () => run(Object.fromEntries(Object.entries(input).map(([key, value]) => [key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), value]))))
 });
+/**
+* A launch as the steps a person waits through. Each is a status block whose tone is the
+* step's state: success (done), warning (in progress), muted (not started), danger (failed).
+* Derived from what the row has durably reached, not from the reconciler's transient stage.
+*/
+function launchSteps(row) {
+	const done = [
+		Boolean(row.ref),
+		Boolean(row.ref) && (row.driverCheckout ? Boolean(row.workspace) : Boolean(row.bootstrapped)),
+		Boolean(row.threadId) && row.state === "running"
+	];
+	const steps = [
+		{
+			id: "step-sandbox",
+			label: "Start sandbox"
+		},
+		{
+			id: "step-environment",
+			label: "Prepare environment",
+			detail: "A project's first sandbox also runs its setup script"
+		},
+		{
+			id: "step-agent",
+			label: "Start the agent"
+		}
+	];
+	const active = done.indexOf(false);
+	return steps.map(({ detail, ...step }, index) => ({
+		...step,
+		kind: "status",
+		tone: done[index] ? "success" : index !== active ? "muted" : row.state === "error" ? "danger" : "warning",
+		...index === active && (row.error || detail) ? { detail: row.error ?? detail } : {},
+		actions: []
+	}));
+}
 const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 6e4))} min ago`;
 function quoteRows(state, time = Date.now()) {
 	return state.profiles.filter((p) => p.pricing === "provider").map((p) => {
@@ -16556,7 +16720,7 @@ var plugin_default = {
 					descriptor("stop", "Stop sandbox", () => remote("stopped", {})),
 					descriptor("awake", "Keep sandbox awake", (input) => remote("keep-awake", input), { agent: true })
 				],
-				views: [{
+				views: !guestConfig.controllerUrl ? [] : [{
 					id: "status",
 					title: "Sandbox",
 					location: "thread-details",
@@ -16590,9 +16754,16 @@ var plugin_default = {
 			"set",
 			"remove"
 		].map((key) => [key, (...args) => runPromise(context.secrets[key](...args))]));
+		const environments = yield* call("environments", () => createEnvironments(context.dataDirectory));
+		const projectRemote = async (projectId) => {
+			const project = await runPromise(context.projects.describe(String(projectId)));
+			if (!project.remoteUrl) throw new Error("This project has no Git remote.");
+			return project.remoteUrl;
+		};
 		const controller = yield* call("activate", async () => createController({
 			directory: context.dataDirectory,
 			secrets,
+			environment: async (repository) => environments.get(repository),
 			source: await readFile(fileURLToPath(import.meta.url), "utf8"),
 			changed: notify,
 			preserve: async (row, threads) => {
@@ -16653,6 +16824,22 @@ var plugin_default = {
 			changes: fromPubSub(changes),
 			commands: [
 				descriptor("launch", "Start a sandboxed project thread", (input) => mutate(() => launchSandbox(controller, input))),
+				descriptor("auto-launch", "Start a new chat in its own sandbox", (input) => mutate(() => autoLaunch(controller, input))),
+				descriptor("environment-save", "Save sandbox environment", async (input) => {
+					await environments.set(await projectRemote(input.projectId), input);
+					notify();
+					return null;
+				}),
+				descriptor("environment-reset", "Rebuild environment snapshot", async (input) => {
+					const repository = await projectRemote(input.projectId);
+					await controller.environmentStatus({
+						repository,
+						...await environments.get(repository),
+						reset: true
+					});
+					notify();
+					return null;
+				}),
 				descriptor("cancel", "Cancel provisioning and delete sandbox", (input) => mutate(() => controller.action(input.id, "deleted", { confirm: true }))),
 				descriptor("profile", "Configure provider profile", (input) => controller.configure(input)),
 				descriptor("adopt", "Adopt orphaned sandbox", (input) => controller.adopt(input)),
@@ -16686,22 +16873,19 @@ var plugin_default = {
 					title: "New sandbox",
 					location: "environment-launcher",
 					permission: "environment:maintain",
+					autoLaunch: "auto-launch",
 					read: (input = {}) => call("launcher", async () => {
 						const state = controller.snapshot();
 						const row = state.rows.find((row) => row.id === input.requestId);
 						if (row) return {
 							title: "New sandbox",
-							blocks: [{
-								id: "progress",
-								kind: "text",
-								text: row.error ?? `${row.state}: ${row.stage ?? row.title}`
-							}, {
+							blocks: [...launchSteps(row), {
 								id: "control",
 								kind: "actions",
-								actions: row.state === "starting" ? [action("cancel", "Cancel provisioning and delete sandbox", "cancel", { id: row.id })] : row.state === "error" ? [action("retry", "Retry", "state", {
+								actions: row.state === "error" ? [action("retry", "Retry", "state", {
 									id: row.id,
 									state: "running"
-								})] : []
+								}), action("cancel", "Cancel", "cancel", { id: row.id })] : row.state === "starting" ? [action("cancel", "Cancel", "cancel", { id: row.id })] : []
 							}]
 						};
 						if (!state.profiles.length) return {
@@ -16762,12 +16946,16 @@ var plugin_default = {
 							id: row.id.replace(/^[0-9]/, "s$&"),
 							kind: "environment",
 							environmentId: row.environmentId,
-							label: row.title ?? row.profile,
+							label: "Sandbox",
 							url: row.url,
 							state: row.state,
 							...row.threadId ? { threadId: row.threadId } : {},
 							launchRequestId: row.id,
-							connect: action("connect", "Connect", "pair", { id: row.id })
+							connect: action("connect", "Connect", "pair", { id: row.id }),
+							...row.state === "stopped" && !row.orphan ? { resume: action("resume", "Resume", "state", {
+								id: row.id,
+								state: "running"
+							}) } : {}
 						}))
 					})
 				},
@@ -16783,7 +16971,7 @@ var plugin_default = {
 							kind: "status",
 							environmentId: row.environmentId,
 							tone: tone(row.state),
-							label: `${row.profile}: ${row.state}`,
+							label: `Sandbox ${row.state}`,
 							detail: row.error ?? "Managed sandbox",
 							actions: row.state === "deleted" ? [] : [{
 								...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
@@ -16793,6 +16981,58 @@ var plugin_default = {
 								...row.state === "stopped" ? {} : { confirm: "Stop the sandbox after retaining its thread history?" }
 							}]
 						}))
+					})
+				},
+				{
+					id: "environment",
+					title: "Sandbox environment",
+					location: "project-settings",
+					permission: "environment:maintain",
+					read: (input = {}) => call("environment", async () => {
+						const title = "Sandbox environment";
+						let repository;
+						try {
+							repository = await projectRemote(input.projectId);
+						} catch {
+							return {
+								title,
+								blocks: [{
+									id: "remote",
+									kind: "text",
+									text: "Sandboxes clone this project from its Git remote. Add an origin remote to configure an environment."
+								}]
+							};
+						}
+						const environment = await environments.get(repository);
+						const snapshot = (await controller.environmentStatus({
+							repository,
+							...environment
+						}).catch(() => null))?.snapshot;
+						return {
+							title,
+							blocks: [
+								{
+									id: "about",
+									kind: "text",
+									text: "Every sandbox of this project starts with this environment. The setup script runs once in the fresh checkout (install, build, seed); its result is saved as a snapshot that later sandboxes start from, and is rebuilt when the script changes or after a week. The start script runs in the background every time a sandbox starts or resumes (databases, dev servers). Variables are set for the agent, its tools and both scripts."
+								},
+								form("environment", "Save environment", "environment-save", [
+									field("setup", "Setup script (bash, run once from the repository root)", "multiline", environment.setup),
+									field("start", "Start script (bash, run on every sandbox start)", "multiline", environment.start),
+									field("env", "Environment variables (one KEY=VALUE per line)", "multiline", environment.env)
+								], { projectId: String(input.projectId) }),
+								{
+									id: "snapshot",
+									kind: "text",
+									text: !environment.setup.trim() ? "No setup script: sandboxes start from a plain checkout." : snapshot ? `Snapshot saved ${snapshot.created.replace("T", " ").replace("Z", " UTC")}${snapshot.current ? "" : " (out of date: the next sandbox rebuilds it)"}.` : "No snapshot yet: the next sandbox runs the setup script and saves one."
+								},
+								...snapshot ? [{
+									id: "snapshot-actions",
+									kind: "actions",
+									actions: [action("reset", "Rebuild snapshot with the next sandbox", "environment-reset", { projectId: String(input.projectId) })]
+								}] : []
+							]
+						};
 					})
 				},
 				{

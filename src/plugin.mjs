@@ -12,7 +12,8 @@ import { timingSafeEqual } from "node:crypto";
 import { createController } from "./controller.mjs";
 import { tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
-import { launchProject, launchSandbox } from "./launch.mjs";
+import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
+import { createEnvironments } from "./environments.mjs";
 class PluginError extends Schema.TaggedError()("PluginError", {
   operation: Schema.String,
   cause: Schema.Defect(),
@@ -57,6 +58,41 @@ const descriptor = (
       ),
     ),
 });
+/**
+ * A launch as the steps a person waits through. Each is a status block whose tone is the
+ * step's state: success (done), warning (in progress), muted (not started), danger (failed).
+ * Derived from what the row has durably reached, not from the reconciler's transient stage.
+ */
+function launchSteps(row) {
+  const done = [
+    Boolean(row.ref),
+    Boolean(row.ref) && (row.driverCheckout ? Boolean(row.workspace) : Boolean(row.bootstrapped)),
+    Boolean(row.threadId) && row.state === "running",
+  ];
+  const steps = [
+    { id: "step-sandbox", label: "Start sandbox" },
+    {
+      id: "step-environment",
+      label: "Prepare environment",
+      detail: "A project's first sandbox also runs its setup script",
+    },
+    { id: "step-agent", label: "Start the agent" },
+  ];
+  const active = done.indexOf(false);
+  return steps.map(({ detail, ...step }, index) => ({
+    ...step,
+    kind: "status",
+    tone: done[index]
+      ? "success"
+      : index !== active
+        ? "muted"
+        : row.state === "error"
+          ? "danger"
+          : "warning",
+    ...(index === active && (row.error || detail) ? { detail: row.error ?? detail } : {}),
+    actions: [],
+  }));
+}
 const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 60000))} min ago`;
 // One row per quoted profile: the last accepted quote, its age and validity, and any failed refresh.
 function quoteRows(state, time = Date.now()) {
@@ -316,39 +352,43 @@ export default {
               agent: true,
             }),
           ],
-          views: [
-            {
-              id: "status",
-              title: "Sandbox",
-              location: "thread-details",
-              permission: "orchestration:read",
-              read: () =>
-                call("status", async () => {
-                  const s = await status();
-                  return {
-                    title: "Sandbox",
-                    blocks: [
-                      {
-                        id: "sandbox",
-                        kind: "status",
-                        tone: tone(s.state),
-                        label: s.state,
-                        detail: s.detail ?? "Dedicated sandbox environment",
-                        actions: guestConfig.controllerUrl
-                          ? [
-                              {
-                                ...action("stop", "Stop sandbox", "stop"),
-                                confirm:
-                                  "Stop this sandbox? Its thread transcripts will be retained by the controller.",
-                              },
-                            ]
-                          : [],
-                      },
-                    ],
-                  };
-                }),
-            },
-          ],
+          // The controller already shows this sandbox's state and its Stop/Resume control on
+          // the same thread; the guest adds its own row only when it carries the stop control.
+          views: !guestConfig.controllerUrl
+            ? []
+            : [
+                {
+                  id: "status",
+                  title: "Sandbox",
+                  location: "thread-details",
+                  permission: "orchestration:read",
+                  read: () =>
+                    call("status", async () => {
+                      const s = await status();
+                      return {
+                        title: "Sandbox",
+                        blocks: [
+                          {
+                            id: "sandbox",
+                            kind: "status",
+                            tone: tone(s.state),
+                            label: s.state,
+                            detail: s.detail ?? "Dedicated sandbox environment",
+                            actions: guestConfig.controllerUrl
+                              ? [
+                                  {
+                                    ...action("stop", "Stop sandbox", "stop"),
+                                    confirm:
+                                      "Stop this sandbox? Its thread transcripts will be retained by the controller.",
+                                  },
+                                ]
+                              : [],
+                          },
+                        ],
+                      };
+                    }),
+                },
+              ],
         };
       }
       const queue = yield* Queue.unbounded();
@@ -361,10 +401,19 @@ export default {
           (...args) => Effect.runPromise(context.secrets[key](...args)),
         ]),
       );
+      const environments = yield* call("environments", () =>
+        createEnvironments(context.dataDirectory),
+      );
+      const projectRemote = async (projectId) => {
+        const project = await Effect.runPromise(context.projects.describe(String(projectId)));
+        if (!project.remoteUrl) throw new Error("This project has no Git remote.");
+        return project.remoteUrl;
+      };
       const controller = yield* call("activate", async () =>
         createController({
           directory: context.dataDirectory,
           secrets,
+          environment: async (repository) => environments.get(repository),
           source: await readFile(fileURLToPath(import.meta.url), "utf8"),
           changed: notify,
           preserve: async (row, threads) => {
@@ -437,6 +486,24 @@ export default {
           descriptor("launch", "Start a sandboxed project thread", (input) =>
             mutate(() => launchSandbox(controller, input)),
           ),
+          descriptor("auto-launch", "Start a new chat in its own sandbox", (input) =>
+            mutate(() => autoLaunch(controller, input)),
+          ),
+          descriptor("environment-save", "Save sandbox environment", async (input) => {
+            await environments.set(await projectRemote(input.projectId), input);
+            notify();
+            return null;
+          }),
+          descriptor("environment-reset", "Rebuild environment snapshot", async (input) => {
+            const repository = await projectRemote(input.projectId);
+            await controller.environmentStatus({
+              repository,
+              ...(await environments.get(repository)),
+              reset: true,
+            });
+            notify();
+            return null;
+          }),
           descriptor("cancel", "Cancel provisioning and delete sandbox", (input) =>
             mutate(() => controller.action(input.id, "deleted", { confirm: true })),
           ),
@@ -488,6 +555,7 @@ export default {
             title: "New sandbox",
             location: "environment-launcher",
             permission: "environment:maintain",
+            autoLaunch: "auto-launch",
             read: (input = {}) =>
               call("launcher", async () => {
                 const state = controller.snapshot();
@@ -496,31 +564,18 @@ export default {
                   return {
                     title: "New sandbox",
                     blocks: [
-                      {
-                        id: "progress",
-                        kind: "text",
-                        text: row.error ?? `${row.state}: ${row.stage ?? row.title}`,
-                      },
+                      ...launchSteps(row),
                       {
                         id: "control",
                         kind: "actions",
                         actions:
-                          row.state === "starting"
+                          row.state === "error"
                             ? [
-                                action(
-                                  "cancel",
-                                  "Cancel provisioning and delete sandbox",
-                                  "cancel",
-                                  { id: row.id },
-                                ),
+                                action("retry", "Retry", "state", { id: row.id, state: "running" }),
+                                action("cancel", "Cancel", "cancel", { id: row.id }),
                               ]
-                            : row.state === "error"
-                              ? [
-                                  action("retry", "Retry", "state", {
-                                    id: row.id,
-                                    state: "running",
-                                  }),
-                                ]
+                            : row.state === "starting"
+                              ? [action("cancel", "Cancel", "cancel", { id: row.id })]
                               : [],
                       },
                     ],
@@ -600,12 +655,22 @@ export default {
                     id: row.id.replace(/^[0-9]/, "s$&"),
                     kind: "environment",
                     environmentId: row.environmentId,
-                    label: row.title ?? row.profile,
+                    // Clients show this as the environment's name ("Starting Sandbox").
+                    label: "Sandbox",
                     url: row.url,
                     state: row.state,
                     ...(row.threadId ? { threadId: row.threadId } : {}),
                     launchRequestId: row.id,
                     connect: action("connect", "Connect", "pair", { id: row.id }),
+                    // Clients run this when the user turns to a thread of a stopped sandbox.
+                    ...(row.state === "stopped" && !row.orphan
+                      ? {
+                          resume: action("resume", "Resume", "state", {
+                            id: row.id,
+                            state: "running",
+                          }),
+                        }
+                      : {}),
                   })),
               }),
           },
@@ -626,7 +691,7 @@ export default {
                     kind: "status",
                     environmentId: row.environmentId,
                     tone: tone(row.state),
-                    label: `${row.profile}: ${row.state}`,
+                    label: `Sandbox ${row.state}`,
                     detail: row.error ?? "Managed sandbox",
                     actions:
                       row.state === "deleted"
@@ -650,6 +715,99 @@ export default {
                             },
                           ],
                   })),
+              }),
+          },
+          {
+            id: "environment",
+            title: "Sandbox environment",
+            location: "project-settings",
+            permission: "environment:maintain",
+            read: (input = {}) =>
+              call("environment", async () => {
+                const title = "Sandbox environment";
+                let repository;
+                try {
+                  repository = await projectRemote(input.projectId);
+                } catch {
+                  return {
+                    title,
+                    blocks: [
+                      {
+                        id: "remote",
+                        kind: "text",
+                        text: "Sandboxes clone this project from its Git remote. Add an origin remote to configure an environment.",
+                      },
+                    ],
+                  };
+                }
+                const environment = await environments.get(repository);
+                const status = await controller
+                  .environmentStatus({ repository, ...environment })
+                  .catch(() => null);
+                const snapshot = status?.snapshot;
+                return {
+                  title,
+                  blocks: [
+                    {
+                      id: "about",
+                      kind: "text",
+                      text: "Every sandbox of this project starts with this environment. The setup script runs once in the fresh checkout (install, build, seed); its result is saved as a snapshot that later sandboxes start from, and is rebuilt when the script changes or after a week. The start script runs in the background every time a sandbox starts or resumes (databases, dev servers). Variables are set for the agent, its tools and both scripts.",
+                    },
+                    form(
+                      "environment",
+                      "Save environment",
+                      "environment-save",
+                      [
+                        field(
+                          "setup",
+                          "Setup script (bash, run once from the repository root)",
+                          "multiline",
+                          environment.setup,
+                        ),
+                        field(
+                          "start",
+                          "Start script (bash, run on every sandbox start)",
+                          "multiline",
+                          environment.start,
+                        ),
+                        field(
+                          "env",
+                          "Environment variables (one KEY=VALUE per line)",
+                          "multiline",
+                          environment.env,
+                        ),
+                      ],
+                      { projectId: String(input.projectId) },
+                    ),
+                    {
+                      id: "snapshot",
+                      kind: "text",
+                      text: !environment.setup.trim()
+                        ? "No setup script: sandboxes start from a plain checkout."
+                        : snapshot
+                          ? `Snapshot saved ${snapshot.created.replace("T", " ").replace("Z", " UTC")}${snapshot.current ? "" : " (out of date: the next sandbox rebuilds it)"}.`
+                          : "No snapshot yet: the next sandbox runs the setup script and saves one.",
+                    },
+                    ...(snapshot
+                      ? [
+                          {
+                            id: "snapshot-actions",
+                            kind: "actions",
+                            actions: [
+                              action(
+                                "reset",
+                                "Rebuild snapshot with the next sandbox",
+                                "environment-reset",
+                                {
+                                  projectId: String(input.projectId),
+                                },
+                              ),
+                            ],
+                          },
+                        ]
+                      : []),
+                  ],
+                };
               }),
           },
           {

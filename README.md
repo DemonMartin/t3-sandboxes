@@ -2,6 +2,27 @@
 
 An external plugin for the host on [`t3/create-plugin-system`](https://github.com/djgilcrease/t3code/tree/t3/create-plugin-system). The controller lives on your always-on T3 environment. Each sandbox runs its own T3 environment and this plugin in reporter mode. Your clients connect directly to the sandbox.
 
+## This fork
+
+This fork of [digitalxero/t3-sandboxes](https://github.com/digitalxero/t3-sandboxes) makes a sandbox the default place a chat runs, the way cloud coding agents work: open a project, write a message, send. It needs the matching T3 Code host changes from [DemonMartin/t3code](https://github.com/DemonMartin/t3code) (branch `agentbox`, see its `FORK.md`) (an `autoLaunch` field on launcher views, a `resume` action on managed environments, step rows for launcher progress); on a host without them the plugin behaves like upstream.
+
+- **A sandbox per chat, automatically.** The first send of a new chat is offered to the plugin (`auto-launch` command). With `autoSandbox` on (policy, default on) it starts a sandbox from the remote tip of the branch picked in the composer and launches the thread there; the thread title is generated from the message. Picking the machine under "Run on" opts one draft out. A send the sandbox cannot take (attachments, no Git remote) is refused with a reason instead of silently running on the host.
+- **One project.** The guest project takes the originating project's name, so clients list sandbox threads under the same project, grouped by repository.
+- **Environments.** Each repository has an environment, edited under Project settings → Sandbox environment and stored in the plugin's data directory (`environments.json`, mode 600): a *setup script* (run once in a fresh checkout), a *start script* (run in the background on every start and resume) and *environment variables* (one `KEY=VALUE` per line). Drivers that declare the `prepare` capability receive it; see below.
+- **Stopped sandboxes come back on use.** A stopped sandbox advertises a `resume` action; the client runs it when the user opens the thread, sends a message or runs a thread command such as Settle.
+- **Stopping.** When every thread of a sandbox is settled it stops (after a two-minute grace from its last start, so a sandbox resumed to continue a settled thread does not stop under the user); otherwise the idle window applies.
+- **Progress as steps.** While a launch is running, the launcher view returns one `status` block per step (`success` done, `warning` in progress, `muted` not started, `danger` failed) plus `cancel`/`retry` actions, which the client renders like its own thread setup steps.
+
+### Driver additions
+
+External drivers can opt in to owning the checkout by setting `"prepare": true` in the profile's `capabilities`. The plugin then:
+
+- passes `environment: { repository, setup, start, env }` in the `create` input;
+- calls `prepare` with `[ref, { repository, base, branch, environment }]` every time the sandbox starts, before the guest T3 server is started, and waits up to an hour for it. The driver checks the repository out at `base` on `branch`, runs the setup script once, may snapshot the result for later sandboxes, runs the start script, and returns `{ "workspace": "/absolute/path", "setup": "ok" | "cached" | "failed" | "none" }`. The thread then runs in that checkout itself (no extra worktree);
+- calls `environment` with `[{ repository, setup, start, env, reset? }]` to show the snapshot state in project settings (`{ "snapshot": null | { "created", "bytes", "current" } }`); `reset: true` drops the snapshot.
+
+[`examples/docker-driver/driver.py`](examples/docker-driver/driver.py) is a complete driver for local Docker: resource limits, a published loopback port per sandbox (optionally served on a tailnet), environment variables, and a committed snapshot image per repository that is reused while the base image and setup script are unchanged and it is under a week old.
+
 ## Install and start
 
 Install `https://github.com/digitalxero/t3-sandboxes` through **Settings → Plugins** on the controller. The host selects the latest stable tag. This requires the [plugin-system host branch](https://github.com/djgilcrease/t3code/tree/t3/create-plugin-system), at least commit `e2d0e6ea87`; upstream T3 Code does not include this host yet.

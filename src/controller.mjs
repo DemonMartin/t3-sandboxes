@@ -8,6 +8,7 @@ import { policy, decide, deadline } from "./policy.mjs";
 import { usage } from "./billing.mjs";
 import { readQuote, snapshot } from "./pricing.mjs";
 import { workspaceSafetyScript } from "./safety.mjs";
+const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 export async function createController({
   directory,
   secrets,
@@ -15,6 +16,7 @@ export async function createController({
   changed = () => {},
   diagnostic = () => {},
   preserve = async () => false,
+  environment = async () => ({}),
   drivers = driver,
   guest = (url, token) => new Guest(url, token),
   now = Date.now,
@@ -164,7 +166,7 @@ export async function createController({
           await getDriver(row)
         ).exec(
           row.ref,
-          `node -e ${quote(workspaceSafetyScript("/home/user/t3-sandbox/repo"))}`,
+          `node -e ${quote(workspaceSafetyScript(row.workspace ?? DEFAULT_WORKSPACE))}`,
         )) === "safe";
     } catch {
       row.workSafe = false;
@@ -201,12 +203,23 @@ export async function createController({
           }
           if (priced.price) row.price = priced.price;
           row.createAttempted = true;
+          // Decided once, at creation: sandboxes made before the driver could prepare
+          // keep the checkout and worktree the bootstrap gave them.
+          row.driverCheckout = d.capabilities.prepare === true;
           await save();
           const made = await d.create({
             name: row.name,
             requestId: row.id,
             ttl: state.policy.unattendedMinutes * 60,
             ...(row.choice ? { choice: row.choice } : {}),
+            ...(row.driverCheckout
+              ? {
+                  environment: {
+                    repository: row.repository,
+                    ...(await environment(row.repository)),
+                  },
+                }
+              : {}),
           });
           if (!made.ref) throw new Error("Provider returned no resource id");
           row.ref = made.ref;
@@ -294,6 +307,21 @@ export async function createController({
           await save();
           const key = (await secrets.get(`reporter-${row.id}`)) ?? randomBytes(32).toString("hex");
           await secrets.set(`reporter-${row.id}`, key);
+          if (row.driverCheckout) {
+            // The driver owns the checkout: one sandbox is one thread, so it works in the
+            // repository itself on its own branch instead of a second worktree.
+            row.stage = "Preparing environment";
+            await save();
+            const prepared = await d.prepare(row.ref, {
+              repository: row.repository,
+              base: row.base,
+              branch: `sandbox/${row.id.slice(0, 8)}`,
+              environment: await environment(row.repository),
+            });
+            row.workspace = prepared.workspace;
+            row.setup = prepared.setup;
+            await save();
+          }
           await d.exec(row.ref, "mkdir -p /home/user/t3-sandbox/plugin");
           await d.write(row.ref, "/home/user/t3-sandbox/plugin/plugin.mjs", source);
           row.stage = "Bootstrapping T3";
@@ -311,24 +339,26 @@ export async function createController({
         row.stage = "Starting thread";
         if (!row.threadId) {
           const projects = await g.call("t3_project_list", { limit: 100 });
+          const workspaceRoot = row.workspace ?? DEFAULT_WORKSPACE;
+          // The guest project carries the originating project's name: clients merge both
+          // under one sidebar project by repository, and show this as its label.
           const project =
-            projects.projects.find((x) => x.workspaceRoot === "/home/user/t3-sandbox/repo") ??
+            projects.projects.find((x) => x.workspaceRoot === workspaceRoot) ??
             (await g.call("t3_project_create", {
-              title: row.title,
-              workspaceRoot: "/home/user/t3-sandbox/repo",
+              title: row.projectTitle ?? row.title,
+              workspaceRoot,
             }));
           const result = await g.call("t3_thread_launch", {
             projectId: project.id,
-            title: row.title,
+            title: row.autoTitle ? "New thread" : row.title,
+            ...(row.autoTitle ? { generateTitle: true } : {}),
             ...(row.message ? { message: row.message } : {}),
             ...(row.modelSelection ? { modelSelection: row.modelSelection } : {}),
             ...(row.runtimeMode ? { runtimeMode: row.runtimeMode } : {}),
             clientRequestId: row.id,
-            workspaceStrategy: {
-              type: "worktree",
-              baseRef: row.base,
-              branch: `sandbox/${row.id.slice(0, 8)}`,
-            },
+            workspaceStrategy: row.workspace
+              ? { type: "root" }
+              : { type: "worktree", baseRef: row.base, branch: `sandbox/${row.id.slice(0, 8)}` },
           });
           row.threadId = result.threadId;
           row.message = null;
@@ -474,6 +504,13 @@ export async function createController({
         if (input.token) await secrets.set(`provider-${id}`, input.token);
         await save();
       }),
+    /** Snapshot state of a repository's environment, for drivers that keep one. */
+    environmentStatus: async (spec) => {
+      const p = state.profiles[0];
+      if (!p) return null;
+      const d = drivers({ ...p, token: await secrets.get(`provider-${p.id}`) });
+      return d.capabilities.prepare && d.environment ? d.environment(spec) : null;
+    },
     setPolicy: (input) =>
       serial(async () => {
         state.policy = policy(input);
@@ -511,6 +548,8 @@ export async function createController({
           name: `t3-${state.owner.slice(0, 8)}-${p.id}-${id}`,
           profile: p.id,
           title: String(input.title ?? "Sandbox").slice(0, 150),
+          ...(input.projectTitle ? { projectTitle: String(input.projectTitle).slice(0, 150) } : {}),
+          ...(input.autoTitle === true ? { autoTitle: true } : {}),
           hourlyRate: p.hourlyRate,
           ...(quote ? { price: snapshot(quote) } : {}),
           ...(p.choice ? { choice: p.choice } : {}),
@@ -663,7 +702,16 @@ export async function createController({
         }
         pending.push(worker);
       }
-      await Promise.all(pending);
+      // Preparing an environment can take minutes; one slow sandbox must not hold up
+      // the others, so a tick moves on and the next one picks the worker up again.
+      let timer;
+      await Promise.race([
+        Promise.all(pending),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, 5000);
+        }),
+      ]);
+      clearTimeout(timer);
     },
     close: async () => {
       await tail;

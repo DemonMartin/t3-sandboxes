@@ -46,3 +46,67 @@ export async function launchSandbox(controller, input) {
   }
   return { $t3: "environment-launch", requestId: input.requestId };
 }
+
+const git = (directory, ...args) => command("git", ["-C", directory, ...args]);
+const firstLine = (message) => message.trim().split("\n", 1)[0].replace(/\s+/g, " ").slice(0, 80);
+
+/**
+ * The first send of a new chat, offered to the plugin before the host sends it locally.
+ * Returns null to decline (the chat then runs on this machine); throws when a sandbox was
+ * wanted but cannot be started, so the message never silently runs unsandboxed.
+ */
+export async function autoLaunch(controller, input) {
+  const { policy, profiles, rows } = controller.snapshot();
+  if (!policy.autoSandbox || !profiles.length) return null;
+  if (!/^[a-f0-9-]{36}$/.test(input.requestId ?? "")) throw new Error("Invalid launch request id");
+  if (!rows.some((row) => row.id === input.requestId)) {
+    if (typeof input.message !== "string" || !input.message.trim())
+      throw new Error("Write a first message to start the sandbox with.");
+    if (input.hasAttachments)
+      throw new Error(
+        "A sandbox starts from a text-only first message. Remove the attachments, or switch Run on to this machine.",
+      );
+    const project = await launchProject(input).catch(() => {
+      throw new Error(
+        "A sandbox needs a Git project with an origin remote. Switch Run on to this machine to work here.",
+      );
+    });
+    // Start from what is on the remote, not from this checkout: the branch picked in the
+    // composer (or checked out here) when it exists there, otherwise the remote's default.
+    await git(project.directory, "fetch", "--prune", "origin");
+    const branch =
+      typeof input.branch === "string" && /^[A-Za-z0-9._\/-]+$/.test(input.branch)
+        ? input.branch.replace(/^origin\//, "")
+        : await git(project.directory, "rev-parse", "--abbrev-ref", "HEAD");
+    const base =
+      (await git(
+        project.directory,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `refs/remotes/origin/${branch}`,
+      ).catch(() => "")) ||
+      (await git(
+        project.directory,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "refs/remotes/origin/HEAD",
+      ).catch(() => "")) ||
+      (await git(project.directory, "ls-remote", "origin", "HEAD")).split(/\s/, 1)[0];
+    const modelSelection =
+      typeof input.modelSelection === "string" && input.modelSelection
+        ? JSON.parse(input.modelSelection)
+        : input.modelSelection;
+    await controller.create({
+      ...input,
+      ...project,
+      base,
+      profile: profiles[0].id,
+      title: firstLine(input.message),
+      autoTitle: true,
+      modelSelection,
+    });
+  }
+  return { $t3: "environment-launch", requestId: input.requestId };
+}

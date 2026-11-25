@@ -163,10 +163,13 @@ export function driver(profile, run = command) {
   };
 }
 function external(profile, run) {
-  const call = async (operation, input) => {
+  const call = async (operation, input, timeout) => {
     if (profile.executable)
       return JSON.parse(
-        await run(profile.executable, [], { input: JSON.stringify({ operation, input }) }),
+        await run(profile.executable, [], {
+          input: JSON.stringify({ operation, input }),
+          ...(timeout ? { timeout } : {}),
+        }),
       );
     const response = await fetch(profile.endpoint, {
       method: "POST",
@@ -199,6 +202,10 @@ function external(profile, run) {
         "quote",
       ].map((op) => [op, (...args) => call(op, args)]),
     ),
+    // Optional (capabilities.prepare): checks the repository out, runs the environment's
+    // setup once and its start script. Setup can take many minutes on a cold cache.
+    prepare: (...args) => call("prepare", args, 3600000),
+    environment: (...args) => call("environment", args),
   };
 }
 export function bootstrap(row, profile) {
@@ -210,12 +217,16 @@ mkdir -p ${root}/home/userdata ${root}/plugin
 printf %s ${q(JSON.stringify({ plugins: [{ id: "sandboxes", path: root + "/plugin/plugin.mjs", enabled: true }, ...(profile.rehomePath ? [{ id: "rehome", path: profile.rehomePath, enabled: true }] : [])] }))} > ${root}/home/plugins.json
 printf %s ${q(JSON.stringify({ mode: "guest", sandboxId: row.id, controllerUrl: profile.controllerUrl ?? null, key: row.reporterKey }))} > ${root}/home/plugins-guest.json
 chmod 600 ${root}/home/plugins-guest.json
-if [ ! -d ${root}/repo/.git ]; then
+${
+  row.workspace
+    ? ""
+    : `if [ ! -d ${root}/repo/.git ]; then
   git clone -- ${q(row.repository)} ${root}/repo
   cd ${root}/repo
   git checkout --detach ${q(row.base)}
-fi
-cd ${root}/repo
+fi`
+}
+cd ${q(row.workspace ?? root + "/repo")}
 # A dedicated image supplies the same plugin host build as the controller.
 ${quote(profile.t3Command ?? "t3")} --version >/dev/null
 if [ ! -f ${root}/server.pid ] || ! kill -0 "$(cat ${root}/server.pid)" 2>/dev/null; then
