@@ -372,6 +372,9 @@ def require(ref: str) -> dict:
 
 
 def handle(operation: str, args: list):
+    if operation == "capabilities":
+        # Read by the plugin when the profile is saved.
+        return {"deadline": False, "stopKeepsDisk": True, "prepare": True, "resize": True}
     if operation == "list":
         return [observe(info) for info in sandboxes()]
     if operation == "create":

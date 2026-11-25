@@ -4,27 +4,83 @@ An external plugin for the host on [`t3/create-plugin-system`](https://github.co
 
 ## This fork
 
-This fork of [digitalxero/t3-sandboxes](https://github.com/digitalxero/t3-sandboxes) makes a sandbox the default place a chat runs, the way cloud coding agents work: open a project, write a message, send. It needs the matching T3 Code host changes from [DemonMartin/t3code](https://github.com/DemonMartin/t3code) (branch `agentbox`, see its `FORK.md`) (an `autoLaunch` field on launcher views, a `resume` action on managed environments, step rows for launcher progress); on a host without them the plugin behaves like upstream.
+A fork of [digitalxero/t3-sandboxes](https://github.com/digitalxero/t3-sandboxes) that makes a sandbox the default place a chat runs, the way cloud coding agents work: open a project, write a message, send. The chat starts in a fresh sandbox prepared from the project's environment, and stays listed under the project.
 
-- **A sandbox per chat, automatically.** The first send of a new chat is offered to the plugin (`auto-launch` command). With `autoSandbox` on (policy, default on) it starts a sandbox from the remote tip of the branch picked in the composer and launches the thread there; the thread title is generated from the message. Picking the machine under "Run on" opts one draft out. A send the sandbox cannot take (attachments, no Git remote) is refused with a reason instead of silently running on the host.
-- **One project.** The guest project takes the originating project's name, so clients list sandbox threads under the same project, grouped by repository.
-- **Environments.** Each repository has an environment, edited under Project settings → Sandbox environment and stored in the plugin's data directory (`environments.json`, mode 600): a *setup script* (run once in a fresh checkout), a *start script* (run in the background on every start and resume) and *environment variables* (one `KEY=VALUE` per line). Drivers that declare the `prepare` capability receive it; see below.
-- **Stopped sandboxes come back on use.** A stopped sandbox advertises a `resume` action; the client runs it when the user opens the thread, sends a message or runs a thread command such as Settle.
-- **Stopping.** When every thread of a sandbox is settled it stops (after a two-minute grace from its last start, so a sandbox resumed to continue a settled thread does not stop under the user); otherwise the idle window applies.
-- **Idle window per sandbox.** The sandbox's status on its thread says when it will stop ("Sandbox idle · stops in 8 min") and offers the idle window as a choice (10 min to 24 h, `idle` command); the policy's `idleMinutes` is the default.
-- **Sizes.** CPU and memory presets (`low` 4 cores / 16 GB, `medium` 8 / 32, `high` 16 / 48 by default; add or change them under Settings → Extensions → Sandboxes). New sandboxes use the default or the size chosen in the project's sandbox environment; a "Size" choice on the thread changes an existing sandbox in place. Drivers opt in with the `resize` capability: they receive `size: { cpus, memoryGb }` in `create` and a `resize` call with `[ref, { cpus, memoryGb }]`.
-- **Progress as steps.** While a launch is running, the launcher view returns one `status` block per step (`success` done, `warning` in progress, `muted` not started, `danger` failed) plus `cancel`/`retry` actions, which the client renders like its own thread setup steps.
+It is developed together with a fork of the T3 Code plugin host, [DemonMartin/t3code](https://github.com/DemonMartin/t3code) (branch `agentbox`), which adds the client features this plugin relies on. On another host the plugin still loads and behaves like upstream: sandboxes are started by hand from "Run on → New sandbox".
+
+Everything in the upstream guide below still applies unless this section says otherwise.
+
+### What is different from upstream
+
+| Area                   | Upstream                                                                      | This fork                                                                                                                                                             |
+| ---------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Starting a sandbox     | Pick "New sandbox" in the environment picker and confirm a form               | The first send of a new chat starts one automatically (`autoSandbox` policy, on by default). Pick the machine under "Run on" to run one chat on the host instead      |
+| Where the thread shows | A separate project per sandbox, named after the thread                        | The guest project takes the originating project's name, so clients list sandbox threads under the same project                                                        |
+| Thread title           | The title typed in the form                                                   | Generated from the first message                                                                                                                                      |
+| Base commit            | The controller checkout's pushed HEAD                                         | The remote tip of the branch picked in the composer (or checked out), else the remote default branch                                                                  |
+| Checkout               | The plugin clones and uses a worktree                                         | Drivers with `prepare` own the checkout; the thread works in the repository itself on branch `sandbox/<id>`                                                           |
+| Environments           | None                                                                          | Per repository: setup script, start script, environment variables, size. Edited under Project settings → Sandbox environment                                          |
+| Sizes                  | Whatever the image/provider gives                                             | CPU and memory presets (`low` 4 cores / 16 GB, `medium` 8 / 32, `high` 16 / 48 by default), chosen before sending, per project, and changeable on an existing sandbox |
+| Idle stop              | One policy for all                                                            | Default from the policy, plus a per-sandbox choice (10 min to 24 h) with a countdown on the thread                                                                    |
+| Settled threads        | Stop the sandbox at once                                                      | Same, after a two-minute grace from the sandbox's last start, so one resumed to continue a settled thread is not stopped under the user                               |
+| Stopped sandboxes      | Resumed by hand                                                               | Advertise a `resume` action; the client runs it when the user opens the thread, sends a message or runs a thread command                                              |
+| Launch progress        | A text line in a dialog                                                       | Steps with the driver's current phase, elapsed time and the tail of the setup log                                                                                     |
+| Failures               | A generic message                                                             | The cause is also written to `diagnostics.log` in the plugin's data directory                                                                                         |
+| Delegated threads      | A sandbox that used a subagent could not stop (transcript file name too long) | Fixed                                                                                                                                                                 |
+
+### Requirements
+
+- The T3 Code host from [DemonMartin/t3code](https://github.com/DemonMartin/t3code), branch `agentbox`, on the controller **and** inside the sandbox image (the same build in both). See that repository's README for building it.
+- Node 24 or later.
+- For the features marked "driver" below: an external driver that implements them. [`examples/docker-driver/driver.py`](examples/docker-driver/driver.py) does, for local Docker.
+
+### Install
+
+1. Clone this repository on the controller and check out `agentbox`. The bundle `dist/plugin.mjs` is committed; no build step is needed to run it. (`npm ci && npm test` and `npm run build` are for development.)
+2. Register it in `plugins.json` under the controller's T3 home, then restart the T3 server:
+   ```json
+   {
+     "plugins": [
+       {
+         "id": "sandboxes",
+         "path": "/absolute/path/to/t3-sandboxes/dist/plugin.mjs",
+         "enabled": true
+       }
+     ]
+   }
+   ```
+   Installing from Settings → Plugins by repository URL picks the latest stable tag of that repository; to run this branch, register the path as above.
+3. Build a sandbox image that contains: Bash, Git, Node 24, your agent CLIs with their credentials or gateway settings, and the same T3 host build with `t3` on `PATH` (the upstream section "Build a local guest image" shows how to stage the build). If the sandbox runs as root, set `IS_SANDBOX=1` so Claude Code accepts running without permission prompts, and `T3CODE_CODEX_EXTERNAL_SANDBOX=1` so Codex does not try to start its own sandbox inside the container.
+4. In Settings → Extensions → Sandboxes, save a provider profile:
+   - **Docker with environments, sizes and progress (recommended):** driver `external`, "External driver executable" = the absolute path of `examples/docker-driver/driver.py` (or your own driver). When the profile is saved the plugin asks the driver what it supports, so nothing else needs configuring. The example driver is configured with environment variables of the T3 server process; see the top of the file (`SANDBOX_IMAGE`, `SANDBOX_RUN_FLAGS`, `SANDBOX_ENV_FILE`, `SANDBOX_TAILNET_HOST`, `SANDBOX_STATE_DIR`).
+   - **Upstream drivers** (`docker`, `boat`) work as upstream; they have no environments, sizes or progress detail.
+5. Optional: review the policy on the same page (`idleMinutes`, `autoSandbox`, `maxRunning`, `deleteDays`, …) and the sizes table.
+
+### Using it
+
+- **New chat.** Open a project, write the first message, send. "Run on" shows the launcher; next to it you can pick the size. The launch appears under your message as steps and opens the thread when it is ready. A first message with attachments, or a project without an `origin` remote, is refused with a reason rather than silently run on the host.
+- **Environment.** Project settings → Sandbox environment: a _setup script_ (run once in a fresh checkout as the sandbox user, from the repository root), a _start script_ (run in the background on every start and resume), _environment variables_ (one `KEY=VALUE` per line) and the _size_ of new sandboxes. With the example driver, the result of the setup script is committed as a snapshot image per repository and reused while the base image and the script are unchanged and it is less than a week old; "Rebuild snapshot" drops it. Stored in `environments.json` (mode 600) in the plugin's data directory.
+- **On the thread.** The sandbox's row shows its state and when it will stop, with Stop/Resume, an idle-stop choice and a size choice. Changing the size applies to the running sandbox.
+- **Stopping.** A sandbox stops after its idle window, once all its threads are settled, or on Stop; its disk is kept. Using the thread again starts it. Deletion follows upstream rules (after `deleteDays`, only when work is pushed and transcripts were exported).
 
 ### Driver additions
 
-External drivers can opt in to owning the checkout by setting `"prepare": true` in the profile's `capabilities`. The plugin then:
+An external driver executable is asked `{"operation":"capabilities","input":[]}` when its profile is saved and may answer with the capabilities it supports. All of these are optional:
 
-- passes `environment: { repository, setup, start, env }` in the `create` input;
-- calls `prepare` with `[ref, { repository, base, branch, environment }]` every time the sandbox starts, before the guest T3 server is started, and waits up to an hour for it. The driver checks the repository out at `base` on `branch`, runs the setup script once, may snapshot the result for later sandboxes, runs the start script, and returns `{ "workspace": "/absolute/path", "setup": "ok" | "cached" | "failed" | "none" }`. The thread then runs in that checkout itself (no extra worktree);
-- calls `progress` with `[ref]` every few seconds while `prepare` runs, if the driver has it, and shows the answer `{ "phase": "what is happening", "seconds": N, "log": "last lines of output" }` under the "Prepare environment" step;
-- calls `environment` with `[{ repository, setup, start, env, reset? }]` to show the snapshot state in project settings (`{ "snapshot": null | { "created", "bytes", "current" } }`); `reset: true` drops the snapshot.
+| Capability / operation                                                                                                                                                                                                                        | Purpose                                                                                                                                                                                                                                                                           |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prepare: true` → `create` receives `environment: { repository, setup, start, env }`; `prepare` is called with `[ref, { repository, base, branch, environment }]` on every start, before the guest server is used, and may take up to an hour | The driver checks the repository out at `base` on `branch`, runs the setup script once, may snapshot the result, runs the start script, and returns `{ "workspace": "/absolute/path", "setup": "ok" \| "cached" \| "failed" \| "none" }`. The guest server is started in parallel |
+| `progress` with `[ref]`                                                                                                                                                                                                                       | Called every few seconds during `prepare`; returns `{ "phase": "what is happening", "seconds": N, "log": "last lines of output" }`                                                                                                                                                |
+| `environment` with `[{ repository, setup, start, env, reset? }]`                                                                                                                                                                              | Snapshot state for project settings: `{ "snapshot": null \| { "created", "bytes", "current" } }`; `reset: true` drops it                                                                                                                                                          |
+| `resize: true` → `create` receives `size: { cpus, memoryGb }`; `resize` is called with `[ref, { cpus, memoryGb }]`                                                                                                                            | CPU and memory of a new sandbox, and changing them in place                                                                                                                                                                                                                       |
 
-[`examples/docker-driver/driver.py`](examples/docker-driver/driver.py) is a complete driver for local Docker: resource limits, a published loopback port per sandbox (optionally served on a tailnet), environment variables, and a committed snapshot image per repository that is reused while the base image and setup script are unchanged and it is under a week old.
+### Not included here
+
+Publishing sandbox ports (private tailnet or public URLs), the LLM gateway and the sandbox image used by the author are part of a private setup and not in this repository. The example driver only publishes each sandbox's T3 port.
+
+---
+
+The remainder is the upstream guide.
 
 ## Install and start
 

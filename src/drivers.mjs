@@ -206,6 +206,8 @@ function external(profile, run) {
     // setup once and its start script. Setup can take many minutes on a cold cache.
     prepare: (...args) => call("prepare", args, 3600000),
     environment: (...args) => call("environment", args),
+    // Optional: the driver's capabilities, read when its profile is saved.
+    describe: () => call("capabilities", [], 15000),
     // Optional (capabilities.resize): change CPU and memory of an existing sandbox in place.
     resize: (...args) => call("resize", args),
     // Optional: what a running `prepare` is doing, `{ phase, seconds, log }`, for the waiting user.

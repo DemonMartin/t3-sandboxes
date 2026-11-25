@@ -528,6 +528,15 @@ export async function createController({
           if (!quote) throw new Error(`Provider quote refused: ${p.quoteError.message}`);
           p.choice = quote.choice;
         }
+        if (p.driver === "external" && p.executable && !input.capabilities) {
+          // A local driver executable may say what it can do (prepare, resize, ...); one
+          // that does not answer keeps the defaults.
+          try {
+            const declared = await drivers({ ...p, token: input.token }).describe();
+            if (declared && typeof declared === "object")
+              p.capabilities = { ...p.capabilities, ...declared };
+          } catch {}
+        }
         state.profiles = state.profiles.filter((x) => x.id !== id).concat(p);
         if (input.token) await secrets.set(`provider-${id}`, input.token);
         await save();

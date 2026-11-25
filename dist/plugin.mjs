@@ -15329,6 +15329,7 @@ function external(profile, run) {
 		].map((op) => [op, (...args) => call(op, args)])),
 		prepare: (...args) => call("prepare", args, 36e5),
 		environment: (...args) => call("environment", args),
+		describe: () => call("capabilities", [], 15e3),
 		resize: (...args) => call("resize", args),
 		progress: (...args) => call("progress", args, 15e3)
 	};
@@ -15748,7 +15749,41 @@ function sizeEntry(input) {
 		memoryGb
 	};
 }
-const sizeLabel = (size) => `${size.id[0].toUpperCase()}${size.id.slice(1)} · ${size.cpus} cores · ${size.memoryGb} GB`;
+const sizeName = (size) => `${size.id[0].toUpperCase()}${size.id.slice(1)}`;
+const sizeSpecs = (size) => `${size.cpus} cores · ${size.memoryGb} GB`;
+const sizeLabel = (size) => `${sizeName(size)} · ${sizeSpecs(size)}`;
+/** Sizes as a picker's choices: the name, the specs beside it, and how to add another. */
+const sizeChoices = (sizes) => ({
+	choices: sizes.map((size) => ({
+		label: sizeName(size),
+		description: sizeSpecs(size),
+		value: size.id
+	})),
+	create: {
+		label: "New size",
+		command: "size-save",
+		fields: [
+			{
+				name: "id",
+				label: "Name",
+				kind: "text"
+			},
+			{
+				name: "cpus",
+				label: "CPU cores",
+				kind: "number",
+				value: 8
+			},
+			{
+				name: "memory-gb",
+				label: "Memory (GB)",
+				kind: "number",
+				value: 32
+			}
+		],
+		input: {}
+	}
+});
 // src/controller.mjs
 const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, environment = async () => ({}), drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
@@ -16218,6 +16253,16 @@ async function createController({ directory, secrets, source, changed = () => {}
 				if (!quote) throw new Error(`Provider quote refused: ${p.quoteError.message}`);
 				p.choice = quote.choice;
 			}
+			if (p.driver === "external" && p.executable && !input.capabilities) try {
+				const declared = await drivers({
+					...p,
+					token: input.token
+				}).describe();
+				if (declared && typeof declared === "object") p.capabilities = {
+					...p.capabilities,
+					...declared
+				};
+			} catch {}
 			state.profiles = state.profiles.filter((x) => x.id !== id).concat(p);
 			if (input.token) await secrets.set(`provider-${id}`, input.token);
 			await save();
@@ -16699,14 +16744,12 @@ function sandboxStatus(row, { policy, sizes, defaultSize }, time) {
 			},
 			{
 				...action("size", "Size", "size", { id: row.id }),
-				choice: {
+				choice: (({ choices, create }) => ({
 					name: "size",
 					value: size.id,
-					options: sizes.map((candidate) => ({
-						label: sizeLabel(candidate),
-						value: candidate.id
-					}))
-				}
+					options: choices,
+					create
+				}))(sizeChoices(sizes))
 			}
 		]
 	};
@@ -17083,10 +17126,7 @@ var plugin_default = {
 							name: "size",
 							label: "Sandbox size",
 							value: sizes.some((size) => size.id === preferred) ? preferred : defaultSize,
-							choices: sizes.map((size) => ({
-								label: sizeLabel(size),
-								value: size.id
-							}))
+							...sizeChoices(sizes)
 						}]
 					};
 				}),
@@ -17123,11 +17163,25 @@ var plugin_default = {
 					agent: true,
 					permission: "orchestration:read"
 				}),
-				descriptor("size", "Change a sandbox's CPU and memory", (input) => mutate(() => controller.action(input.id, "size", input))),
+				descriptor("size", "Change a sandbox's CPU and memory", (input) => mutate(async () => {
+					await controller.action(input.id, "size", input);
+					const size = controller.snapshot().sizes.find((entry) => entry.id === input.size);
+					return {
+						$t3: "thread-notice",
+						text: `Sandbox size changed to ${sizeName(size)} (${sizeSpecs(size)})`
+					};
+				})),
 				descriptor("size-save", "Save a sandbox size", (input) => controller.saveSize(input)),
 				descriptor("size-delete", "Delete a sandbox size", (input) => controller.removeSize(input.id)),
 				descriptor("size-default", "Set the default sandbox size", (input) => controller.setDefaultSize(input.id)),
-				descriptor("idle", "Set how long this sandbox may sit idle", (input) => mutate(() => controller.action(input.id, "idle", input))),
+				descriptor("idle", "Set how long this sandbox may sit idle", (input) => mutate(async () => {
+					await controller.action(input.id, "idle", input);
+					const row = controller.snapshot().rows.find((entry) => entry.id === input.id);
+					return {
+						$t3: "thread-notice",
+						text: `Idle stop set to ${span(row.idleMinutes)}`
+					};
+				})),
 				descriptor("state", "Stop or resume sandbox", (input) => mutate(() => controller.action(input.id, input.state))),
 				descriptor("awake", "Keep sandbox awake or clear", (input) => mutate(() => controller.action(input.id, "keep-awake", input)), { agent: true }),
 				descriptor("pin", "Pin or unpin sandbox", (input) => mutate(() => controller.action(input.id, "pin", input))),

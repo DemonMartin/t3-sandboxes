@@ -15,7 +15,7 @@ import { effective, idleChoices, outlook, tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
 import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
 import { createEnvironments } from "./environments.mjs";
-import { sizeLabel } from "./sizes.mjs";
+import { sizeChoices, sizeLabel, sizeName, sizeSpecs } from "./sizes.mjs";
 class PluginError extends Schema.TaggedError()("PluginError", {
   operation: Schema.String,
   cause: Schema.Defect(),
@@ -156,14 +156,12 @@ function sandboxStatus(row, { policy, sizes, defaultSize }, time) {
             },
             {
               ...action("size", "Size", "size", { id: row.id }),
-              choice: {
+              choice: (({ choices, create }) => ({
                 name: "size",
                 value: size.id,
-                options: sizes.map((candidate) => ({
-                  label: sizeLabel(candidate),
-                  value: candidate.id,
-                })),
-              },
+                options: choices,
+                create,
+              }))(sizeChoices(sizes)),
             },
           ],
   };
@@ -619,7 +617,7 @@ export default {
                   name: "size",
                   label: "Sandbox size",
                   value: sizes.some((size) => size.id === preferred) ? preferred : defaultSize,
-                  choices: sizes.map((size) => ({ label: sizeLabel(size), value: size.id })),
+                  ...sizeChoices(sizes),
                 },
               ],
             };
@@ -664,7 +662,14 @@ export default {
             { agent: true, permission: "orchestration:read" },
           ),
           descriptor("size", "Change a sandbox's CPU and memory", (input) =>
-            mutate(() => controller.action(input.id, "size", input)),
+            mutate(async () => {
+              await controller.action(input.id, "size", input);
+              const size = controller.snapshot().sizes.find((entry) => entry.id === input.size);
+              return {
+                $t3: "thread-notice",
+                text: `Sandbox size changed to ${sizeName(size)} (${sizeSpecs(size)})`,
+              };
+            }),
           ),
           descriptor("size-save", "Save a sandbox size", (input) => controller.saveSize(input)),
           descriptor("size-delete", "Delete a sandbox size", (input) =>
@@ -674,7 +679,11 @@ export default {
             controller.setDefaultSize(input.id),
           ),
           descriptor("idle", "Set how long this sandbox may sit idle", (input) =>
-            mutate(() => controller.action(input.id, "idle", input)),
+            mutate(async () => {
+              await controller.action(input.id, "idle", input);
+              const row = controller.snapshot().rows.find((entry) => entry.id === input.id);
+              return { $t3: "thread-notice", text: `Idle stop set to ${span(row.idleMinutes)}` };
+            }),
           ),
           descriptor("state", "Stop or resume sandbox", (input) =>
             mutate(() => controller.action(input.id, input.state)),
