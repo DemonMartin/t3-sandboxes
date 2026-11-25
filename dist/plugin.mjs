@@ -1,4 +1,4 @@
-import { cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16844,6 +16844,10 @@ var plugin_default = {
 			directory: context.dataDirectory,
 			secrets,
 			environment: async (repository) => environments.get(repository),
+			diagnostic: (stage, cause) => {
+				const line = `${(/* @__PURE__ */ new Date()).toISOString()} ${stage ?? "operation"}: ${String(cause?.stack ?? cause).slice(0, 2e3)}\n`;
+				appendFile(join(context.dataDirectory, "diagnostics.log"), line, { mode: 384 }).catch(() => {});
+			},
 			source: await readFile(fileURLToPath(import.meta.url), "utf8"),
 			changed: notify,
 			preserve: async (row, threads) => {

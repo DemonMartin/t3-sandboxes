@@ -4,7 +4,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as PubSub from "effect/PubSub";
 import * as Schedule from "effect/Schedule";
-import { readFile, cp, mkdir } from "node:fs/promises";
+import { appendFile, readFile, cp, mkdir } from "node:fs/promises";
 import { watch } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -467,6 +467,14 @@ export default {
           directory: context.dataDirectory,
           secrets,
           environment: async (repository) => environments.get(repository),
+          // Why an operation failed, for the person running the controller; rows only carry
+          // a generic message.
+          diagnostic: (stage, cause) => {
+            const line = `${new Date().toISOString()} ${stage ?? "operation"}: ${String(cause?.stack ?? cause).slice(0, 2000)}\n`;
+            appendFile(join(context.dataDirectory, "diagnostics.log"), line, { mode: 0o600 }).catch(
+              () => {},
+            );
+          },
           source: await readFile(fileURLToPath(import.meta.url), "utf8"),
           changed: notify,
           preserve: async (row, threads) => {
