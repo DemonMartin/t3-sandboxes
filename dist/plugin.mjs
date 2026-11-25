@@ -15328,7 +15328,8 @@ function external(profile, run) {
 			"quote"
 		].map((op) => [op, (...args) => call(op, args)])),
 		prepare: (...args) => call("prepare", args, 36e5),
-		environment: (...args) => call("environment", args)
+		environment: (...args) => call("environment", args),
+		progress: (...args) => call("progress", args, 15e3)
 	};
 }
 function bootstrap(row, profile) {
@@ -16159,6 +16160,17 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (input.token) await secrets.set(`provider-${id}`, input.token);
 			await save();
 		}),
+		/** What the driver is doing for a sandbox that is being prepared; null when it cannot say. */
+		progress: async (id) => {
+			const row = state.rows.find((r) => r.id === id);
+			if (!row?.ref || !row.driverCheckout || row.state !== "starting" || row.workspace) return null;
+			try {
+				const live = await (await getDriver(row)).progress(row.ref);
+				return live?.phase ? live : null;
+			} catch {
+				return null;
+			}
+		},
 		/** Snapshot state of a repository's environment, for drivers that keep one. */
 		environmentStatus: async (spec) => {
 			const p = state.profiles[0];
@@ -16523,7 +16535,8 @@ const descriptor = (id, title, run, { agent = false, permission = "environment:m
 * step's state: success (done), warning (in progress), muted (not started), danger (failed).
 * Derived from what the row has durably reached, not from the reconciler's transient stage.
 */
-function launchSteps(row) {
+const elapsed = (seconds) => seconds >= 60 ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+function launchSteps(row, live = null) {
 	const done = [
 		Boolean(row.ref),
 		Boolean(row.ref) && (row.driverCheckout ? Boolean(row.workspace) : Boolean(row.bootstrapped)),
@@ -16549,7 +16562,7 @@ function launchSteps(row) {
 		...step,
 		kind: "status",
 		tone: done[index] ? "success" : index !== active ? "muted" : row.state === "error" ? "danger" : "warning",
-		...index === active && (row.error || detail) ? { detail: row.error ?? detail } : {},
+		...index === active && (row.error || live || detail) ? { detail: row.error ?? (live ? `${live.phase} · ${elapsed(live.seconds)}` : detail) } : {},
 		actions: []
 	}));
 }
@@ -16891,6 +16904,9 @@ var plugin_default = {
 		yield* addFinalizer(() => call("close", () => controller.close()).pipe(ignore));
 		yield* fromQueue(queue).pipe(runForEach(() => call("reconcile", () => controller.tick()).pipe(ignore)), forkScoped);
 		yield* offer(queue, void 0).pipe(repeat(spaced("30 seconds")), forkScoped);
+		yield* sync(() => {
+			if (controller.snapshot().rows.some((row) => row.state === "starting")) notify();
+		}).pipe(repeat(spaced("3 seconds")), forkScoped);
 		const mutate = async (fn) => {
 			const result = await fn();
 			runFork(offer(queue, void 0));
@@ -16970,17 +16986,28 @@ var plugin_default = {
 					read: (input = {}) => call("launcher", async () => {
 						const state = controller.snapshot();
 						const row = state.rows.find((row) => row.id === input.requestId);
-						if (row) return {
-							title: "New sandbox",
-							blocks: [...launchSteps(row), {
-								id: "control",
-								kind: "actions",
-								actions: row.state === "error" ? [action("retry", "Retry", "state", {
-									id: row.id,
-									state: "running"
-								}), action("cancel", "Cancel", "cancel", { id: row.id })] : row.state === "starting" ? [action("cancel", "Cancel", "cancel", { id: row.id })] : []
-							}]
-						};
+						if (row) {
+							const live = await controller.progress(row.id);
+							return {
+								title: "New sandbox",
+								blocks: [
+									...launchSteps(row, live),
+									...live?.log ? [{
+										id: "output",
+										kind: "code",
+										text: live.log.slice(-4e3)
+									}] : [],
+									{
+										id: "control",
+										kind: "actions",
+										actions: row.state === "error" ? [action("retry", "Retry", "state", {
+											id: row.id,
+											state: "running"
+										}), action("cancel", "Cancel", "cancel", { id: row.id })] : row.state === "starting" ? [action("cancel", "Cancel", "cancel", { id: row.id })] : []
+									}
+								]
+							};
+						}
 						if (!state.profiles.length) return {
 							title: "New sandbox",
 							blocks: [{

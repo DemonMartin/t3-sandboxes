@@ -20,6 +20,7 @@ External drivers can opt in to owning the checkout by setting `"prepare": true` 
 
 - passes `environment: { repository, setup, start, env }` in the `create` input;
 - calls `prepare` with `[ref, { repository, base, branch, environment }]` every time the sandbox starts, before the guest T3 server is started, and waits up to an hour for it. The driver checks the repository out at `base` on `branch`, runs the setup script once, may snapshot the result for later sandboxes, runs the start script, and returns `{ "workspace": "/absolute/path", "setup": "ok" | "cached" | "failed" | "none" }`. The thread then runs in that checkout itself (no extra worktree);
+- calls `progress` with `[ref]` every few seconds while `prepare` runs, if the driver has it, and shows the answer `{ "phase": "what is happening", "seconds": N, "log": "last lines of output" }` under the "Prepare environment" step;
 - calls `environment` with `[{ repository, setup, start, env, reset? }]` to show the snapshot state in project settings (`{ "snapshot": null | { "created", "bytes", "current" } }`); `reset: true` drops the snapshot.
 
 [`examples/docker-driver/driver.py`](examples/docker-driver/driver.py) is a complete driver for local Docker: resource limits, a published loopback port per sandbox (optionally served on a tailnet), environment variables, and a committed snapshot image per repository that is reused while the base image and setup script are unchanged and it is under a week old.

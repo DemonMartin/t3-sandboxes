@@ -499,6 +499,18 @@ export async function createController({
         if (input.token) await secrets.set(`provider-${id}`, input.token);
         await save();
       }),
+    /** What the driver is doing for a sandbox that is being prepared; null when it cannot say. */
+    progress: async (id) => {
+      const row = state.rows.find((r) => r.id === id);
+      if (!row?.ref || !row.driverCheckout || row.state !== "starting" || row.workspace)
+        return null;
+      try {
+        const live = await (await getDriver(row)).progress(row.ref);
+        return live?.phase ? live : null;
+      } catch {
+        return null;
+      }
+    },
     /** Snapshot state of a repository's environment, for drivers that keep one. */
     environmentStatus: async (spec) => {
       const p = state.profiles[0];

@@ -64,7 +64,11 @@ const descriptor = (
  * step's state: success (done), warning (in progress), muted (not started), danger (failed).
  * Derived from what the row has durably reached, not from the reconciler's transient stage.
  */
-function launchSteps(row) {
+const elapsed = (seconds) =>
+  seconds >= 60
+    ? `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+    : `${seconds}s`;
+function launchSteps(row, live = null) {
   const done = [
     Boolean(row.ref),
     Boolean(row.ref) && (row.driverCheckout ? Boolean(row.workspace) : Boolean(row.bootstrapped)),
@@ -90,7 +94,9 @@ function launchSteps(row) {
         : row.state === "error"
           ? "danger"
           : "warning",
-    ...(index === active && (row.error || detail) ? { detail: row.error ?? detail } : {}),
+    ...(index === active && (row.error || live || detail)
+      ? { detail: row.error ?? (live ? `${live.phase} · ${elapsed(live.seconds)}` : detail) }
+      : {}),
     actions: [],
   }));
 }
@@ -520,6 +526,10 @@ export default {
         Effect.repeat(Schedule.spaced("30 seconds")),
         Effect.forkScoped,
       );
+      // A launch in progress is being watched: refresh its steps and output every few seconds.
+      yield* Effect.sync(() => {
+        if (controller.snapshot().rows.some((row) => row.state === "starting")) notify();
+      }).pipe(Effect.repeat(Schedule.spaced("3 seconds")), Effect.forkScoped);
       const mutate = async (fn) => {
         const result = await fn();
         Effect.runFork(Queue.offer(queue, undefined));
@@ -625,11 +635,16 @@ export default {
               call("launcher", async () => {
                 const state = controller.snapshot();
                 const row = state.rows.find((row) => row.id === input.requestId);
-                if (row)
+                if (row) {
+                  const live = await controller.progress(row.id);
                   return {
                     title: "New sandbox",
                     blocks: [
-                      ...launchSteps(row),
+                      ...launchSteps(row, live),
+                      // The tail of what the environment's setup is printing.
+                      ...(live?.log
+                        ? [{ id: "output", kind: "code", text: live.log.slice(-4000) }]
+                        : []),
                       {
                         id: "control",
                         kind: "actions",
@@ -645,6 +660,7 @@ export default {
                       },
                     ],
                   };
+                }
                 if (!state.profiles.length)
                   return {
                     title: "New sandbox",
