@@ -15,6 +15,7 @@ import { effective, idleChoices, outlook, tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
 import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
 import { createEnvironments } from "./environments.mjs";
+import { sizeLabel } from "./sizes.mjs";
 class PluginError extends Schema.TaggedError()("PluginError", {
   operation: Schema.String,
   cause: Schema.Defect(),
@@ -103,8 +104,11 @@ function launchSteps(row, live = null) {
 const span = (minutes) =>
   minutes >= 120 ? `${Math.round(minutes / 60)} h` : minutes >= 60 ? "1 h" : `${minutes} min`;
 /** The sandbox's row on its thread: state, when it will stop, and the controls for both. */
-function sandboxStatus(row, policy, time) {
+function sandboxStatus(row, { policy, sizes, defaultSize }, time) {
   const mine = effective(policy, row);
+  const size =
+    sizes.find((candidate) => candidate.id === row.size) ??
+    sizes.find((candidate) => candidate.id === defaultSize);
   const next = outlook(row, time, mine);
   const left = next ? span(Math.max(1, Math.ceil((next.at - time) / 60000))) : null;
   const label = !next
@@ -150,6 +154,17 @@ function sandboxStatus(row, policy, time) {
                 })),
               },
             },
+            {
+              ...action("size", "Size", "size", { id: row.id }),
+              choice: {
+                name: "size",
+                value: size.id,
+                options: sizes.map((candidate) => ({
+                  label: sizeLabel(candidate),
+                  value: candidate.id,
+                })),
+              },
+            },
           ],
   };
 }
@@ -188,6 +203,37 @@ function settings(controller) {
         kind: "text",
         text: "Each sandbox runs its own T3 environment. Use an image or Boat snapshot containing this plugin host build and your chosen agent tools. Start a sandbox here, then pair to open its thread. Docker is reachable from this computer only; use a provider HTTPS URL or a tailnet URL for your phone.",
       },
+      {
+        id: "sizes-about",
+        kind: "text",
+        text: "Sizes are the CPU and memory presets a sandbox can run with. New sandboxes use the default unless the project's sandbox environment picks another; a running sandbox can be switched from its thread's panel.",
+      },
+      {
+        id: "sizes",
+        kind: "table",
+        columns: ["Size", "CPU cores", "Memory", "Default"],
+        rows: state.sizes.map((size) => ({
+          id: size.id,
+          cells: [
+            size.id,
+            String(size.cpus),
+            `${size.memoryGb} GB`,
+            size.id === state.defaultSize ? "Default" : "",
+          ],
+          actions:
+            size.id === state.defaultSize
+              ? []
+              : [
+                  action("default", "Make default", "size-default", { id: size.id }),
+                  action("delete", "Delete", "size-delete", { id: size.id }),
+                ],
+        })),
+      },
+      form("size", "Save size", "size-save", [
+        field("id", "Name (a new name adds a size, an existing one changes it)"),
+        field("cpus", "CPU cores", "number", 4),
+        field("memoryGb", "Memory (GB)", "number", 16),
+      ]),
       {
         id: "resources",
         kind: "table",
@@ -562,7 +608,10 @@ export default {
             mutate(() => autoLaunch(controller, input)),
           ),
           descriptor("environment-save", "Save sandbox environment", async (input) => {
-            await environments.set(await projectRemote(input.projectId), input);
+            await environments.set(await projectRemote(input.projectId), {
+              ...input,
+              size: input.size === "default" ? "" : input.size,
+            });
             notify();
             return null;
           }),
@@ -593,6 +642,16 @@ export default {
                 .snapshot()
                 .rows.map(({ id, state, title, profile }) => ({ id, state, title, profile })),
             { agent: true, permission: "orchestration:read" },
+          ),
+          descriptor("size", "Change a sandbox's CPU and memory", (input) =>
+            mutate(() => controller.action(input.id, "size", input)),
+          ),
+          descriptor("size-save", "Save a sandbox size", (input) => controller.saveSize(input)),
+          descriptor("size-delete", "Delete a sandbox size", (input) =>
+            controller.removeSize(input.id),
+          ),
+          descriptor("size-default", "Set the default sandbox size", (input) =>
+            controller.setDefaultSize(input.id),
           ),
           descriptor("idle", "Set how long this sandbox may sit idle", (input) =>
             mutate(() => controller.action(input.id, "idle", input)),
@@ -767,7 +826,7 @@ export default {
                   .snapshot()
                   .rows.filter((row) => row.environmentId)
                   .slice(-100)
-                  .map((row) => sandboxStatus(row, controller.snapshot().policy, Date.now())),
+                  .map((row) => sandboxStatus(row, controller.snapshot(), Date.now())),
               }),
           },
           {
@@ -794,6 +853,7 @@ export default {
                   };
                 }
                 const environment = await environments.get(repository);
+                const { sizes, defaultSize } = controller.snapshot();
                 const status = await controller
                   .environmentStatus({ repository, ...environment })
                   .catch(() => null);
@@ -829,6 +889,21 @@ export default {
                           "multiline",
                           environment.env,
                         ),
+                        {
+                          name: "size",
+                          label: "Size of new sandboxes",
+                          kind: "select",
+                          value: sizes.some((size) => size.id === environment.size)
+                            ? environment.size
+                            : "default",
+                          options: [
+                            {
+                              label: `Default (${sizeLabel(sizes.find((size) => size.id === defaultSize))})`,
+                              value: "default",
+                            },
+                            ...sizes.map((size) => ({ label: sizeLabel(size), value: size.id })),
+                          ],
+                        },
                       ],
                       { projectId: String(input.projectId) },
                     ),

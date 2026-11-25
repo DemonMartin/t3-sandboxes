@@ -16,6 +16,7 @@ test("one environment per repository, however its remote is written", async () =
     setup: "",
     start: "",
     env: "",
+    size: "",
   });
   await environments.set("https://github.com/O/R.git", {
     setup: "pnpm install\r\npnpm build",
@@ -26,6 +27,7 @@ test("one environment per repository, however its remote is written", async () =
     setup: "pnpm install\npnpm build",
     start: "",
     env: "# comment\nTOKEN=a=b\n",
+    size: "",
   });
   assert.equal((await stat(join(directory, "environments.json"))).mode & 0o777, 0o600);
   assert.ok((await readFile(join(directory, "environments.json"), "utf8")).includes("TOKEN=a=b"));
@@ -97,4 +99,24 @@ test("a long thread id still gets a file name the filesystem accepts", async () 
   assert.match(key, /^sha256-[a-f0-9]{64}$/);
   assert.ok(`${key}.json.${"x".repeat(36)}`.length < 255);
   assert.notEqual(key, threadFileKey(long + "b"));
+});
+
+test("sizes ship as low, medium and high, and reject nonsense", async () => {
+  const { defaultSizes, sizeEntry, sizeLabel } = await import("../src/sizes.mjs");
+  assert.deepEqual(
+    defaultSizes.map((size) => [size.id, size.cpus, size.memoryGb]),
+    [
+      ["low", 4, 16],
+      ["medium", 8, 32],
+      ["high", 16, 48],
+    ],
+  );
+  assert.deepEqual(sizeEntry({ id: " XL ", cpus: "24", memoryGb: "64" }), {
+    id: "xl",
+    cpus: 24,
+    memoryGb: 64,
+  });
+  assert.equal(sizeLabel(defaultSizes[0]), "Low · 4 cores · 16 GB");
+  assert.throws(() => sizeEntry({ id: "big one", cpus: 4, memoryGb: 16 }));
+  assert.throws(() => sizeEntry({ id: "x", cpus: 0, memoryGb: 16 }));
 });

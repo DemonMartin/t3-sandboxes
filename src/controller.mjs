@@ -8,6 +8,7 @@ import { policy, decide, deadline, effective, idleChoices } from "./policy.mjs";
 import { usage } from "./billing.mjs";
 import { readQuote, snapshot } from "./pricing.mjs";
 import { workspaceSafetyScript } from "./safety.mjs";
+import { defaultSizes, sizeEntry } from "./sizes.mjs";
 const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 export async function createController({
   directory,
@@ -34,6 +35,13 @@ export async function createController({
     await atomic(file, state);
   }
   state.policy = policy(state.policy);
+  state.sizes ??= structuredClone(defaultSizes);
+  if (!state.sizes.some((size) => size.id === state.defaultSize))
+    state.defaultSize = state.sizes[0].id;
+  /** The preset a sandbox runs with; one whose preset was removed falls back to the default. */
+  const sizeOf = (row) =>
+    state.sizes.find((size) => size.id === row.size) ??
+    state.sizes.find((size) => size.id === state.defaultSize);
   let tail = Promise.resolve();
   let saveTail = Promise.resolve();
   const workers = new Map();
@@ -207,6 +215,10 @@ export async function createController({
             requestId: row.id,
             ttl: state.policy.unattendedMinutes * 60,
             ...(row.choice ? { choice: row.choice } : {}),
+            // Only drivers that work with sizes are sent one; others keep their own.
+            ...(d.capabilities.resize
+              ? { size: (({ cpus, memoryGb }) => ({ cpus, memoryGb }))(sizeOf(row)) }
+              : {}),
             ...(row.driverCheckout
               ? {
                   environment: {
@@ -499,6 +511,26 @@ export async function createController({
         if (input.token) await secrets.set(`provider-${id}`, input.token);
         await save();
       }),
+    saveSize: (input) =>
+      serial(async () => {
+        const size = sizeEntry(input);
+        state.sizes = state.sizes.filter((existing) => existing.id !== size.id).concat(size);
+        await save();
+      }),
+    removeSize: (id) =>
+      serial(async () => {
+        if (id === state.defaultSize) throw new Error("Choose another default size first");
+        if (state.rows.some((row) => row.state !== "deleted" && sizeOf(row).id === id))
+          throw new Error("A sandbox still uses this size");
+        state.sizes = state.sizes.filter((size) => size.id !== id);
+        await save();
+      }),
+    setDefaultSize: (id) =>
+      serial(async () => {
+        if (!state.sizes.some((size) => size.id === id)) throw new Error("Unknown sandbox size");
+        state.defaultSize = id;
+        await save();
+      }),
     /** What the driver is doing for a sandbox that is being prepared; null when it cannot say. */
     progress: async (id) => {
       const row = state.rows.find((r) => r.id === id);
@@ -555,6 +587,9 @@ export async function createController({
           name: `t3-${state.owner.slice(0, 8)}-${p.id}-${id}`,
           profile: p.id,
           title: String(input.title ?? "Sandbox").slice(0, 150),
+          size: [input.size, (await environment(input.repository)).size, state.defaultSize].find(
+            (id) => state.sizes.some((size) => size.id === id),
+          ),
           ...(input.projectTitle ? { projectTitle: String(input.projectTitle).slice(0, 150) } : {}),
           ...(input.autoTitle === true ? { autoTitle: true } : {}),
           hourlyRate: p.hourlyRate,
@@ -614,6 +649,18 @@ export async function createController({
             throw new Error("Idle stop must be between 1 minute and 7 days");
           row.idleMinutes = minutes;
           row.lastActivity = now();
+        } else if (action === "size") {
+          const size = state.sizes.find((candidate) => candidate.id === input.size);
+          if (!size) throw new Error("Unknown sandbox size");
+          if (row.ref && row.state !== "deleted") {
+            const d = await getDriver(row);
+            if (!d.capabilities.resize || !d.resize)
+              throw new Error(
+                "This sandbox's provider cannot change the size of an existing sandbox",
+              );
+            await d.resize(row.ref, { cpus: size.cpus, memoryGb: size.memoryGb });
+          }
+          row.size = size.id;
         } else if (action === "pin") row.pinned = input.pinned === true;
         else if (["running", "stopped", "deleted"].includes(action)) {
           if (action === "deleted" && input.confirm !== true)

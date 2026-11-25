@@ -12,6 +12,7 @@ This fork of [digitalxero/t3-sandboxes](https://github.com/digitalxero/t3-sandbo
 - **Stopped sandboxes come back on use.** A stopped sandbox advertises a `resume` action; the client runs it when the user opens the thread, sends a message or runs a thread command such as Settle.
 - **Stopping.** When every thread of a sandbox is settled it stops (after a two-minute grace from its last start, so a sandbox resumed to continue a settled thread does not stop under the user); otherwise the idle window applies.
 - **Idle window per sandbox.** The sandbox's status on its thread says when it will stop ("Sandbox idle · stops in 8 min") and offers the idle window as a choice (10 min to 24 h, `idle` command); the policy's `idleMinutes` is the default.
+- **Sizes.** CPU and memory presets (`low` 4 cores / 16 GB, `medium` 8 / 32, `high` 16 / 48 by default; add or change them under Settings → Extensions → Sandboxes). New sandboxes use the default or the size chosen in the project's sandbox environment; a "Size" choice on the thread changes an existing sandbox in place. Drivers opt in with the `resize` capability: they receive `size: { cpus, memoryGb }` in `create` and a `resize` call with `[ref, { cpus, memoryGb }]`.
 - **Progress as steps.** While a launch is running, the launcher view returns one `status` block per step (`success` done, `warning` in progress, `muted` not started, `danger` failed) plus `cancel`/`retry` actions, which the client renders like its own thread setup steps.
 
 ### Driver additions

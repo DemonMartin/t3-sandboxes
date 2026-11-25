@@ -15329,6 +15329,7 @@ function external(profile, run) {
 		].map((op) => [op, (...args) => call(op, args)])),
 		prepare: (...args) => call("prepare", args, 36e5),
 		environment: (...args) => call("environment", args),
+		resize: (...args) => call("resize", args),
 		progress: (...args) => call("progress", args, 15e3)
 	};
 }
@@ -15711,6 +15712,39 @@ function inspect(directory, run) {
 		"--remotes"
 	]) === "0") ? "safe" : "unsafe");
 }
+// src/sizes.mjs
+/** Resource presets a sandbox can be given. The first three ship by default; "low" is the default. */
+const defaultSizes = Object.freeze([
+	Object.freeze({
+		id: "low",
+		cpus: 4,
+		memoryGb: 16
+	}),
+	Object.freeze({
+		id: "medium",
+		cpus: 8,
+		memoryGb: 32
+	}),
+	Object.freeze({
+		id: "high",
+		cpus: 16,
+		memoryGb: 48
+	})
+]);
+function sizeEntry(input) {
+	const id = String(input.id ?? "").trim().toLowerCase();
+	const cpus = Number(input.cpus);
+	const memoryGb = Number(input.memoryGb);
+	if (!/^[a-z][a-z0-9-]{0,30}$/.test(id)) throw new Error("A size needs a short name (letters, digits, dashes)");
+	if (!Number.isFinite(cpus) || cpus < .5 || cpus > 512) throw new Error("CPU cores must be between 0.5 and 512");
+	if (!Number.isFinite(memoryGb) || memoryGb < 1 || memoryGb > 4096) throw new Error("Memory must be between 1 and 4096 GB");
+	return {
+		id,
+		cpus,
+		memoryGb
+	};
+}
+const sizeLabel = (size) => `${size.id[0].toUpperCase()}${size.id.slice(1)} · ${size.cpus} cores · ${size.memoryGb} GB`;
 // src/controller.mjs
 const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, environment = async () => ({}), drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
@@ -15735,6 +15769,10 @@ async function createController({ directory, secrets, source, changed = () => {}
 		await atomic(file, state);
 	}
 	state.policy = policy(state.policy);
+	state.sizes ??= structuredClone(defaultSizes);
+	if (!state.sizes.some((size) => size.id === state.defaultSize)) state.defaultSize = state.sizes[0].id;
+	/** The preset a sandbox runs with; one whose preset was removed falls back to the default. */
+	const sizeOf = (row) => state.sizes.find((size) => size.id === row.size) ?? state.sizes.find((size) => size.id === state.defaultSize);
 	let tail = Promise.resolve();
 	let saveTail = Promise.resolve();
 	const workers = /* @__PURE__ */ new Map();
@@ -15883,6 +15921,10 @@ async function createController({ directory, secrets, source, changed = () => {}
 						requestId: row.id,
 						ttl: state.policy.unattendedMinutes * 60,
 						...row.choice ? { choice: row.choice } : {},
+						...d.capabilities.resize ? { size: (({ cpus, memoryGb }) => ({
+							cpus,
+							memoryGb
+						}))(sizeOf(row)) } : {},
 						...row.driverCheckout ? { environment: {
 							repository: row.repository,
 							...await environment(row.repository)
@@ -16160,6 +16202,22 @@ async function createController({ directory, secrets, source, changed = () => {}
 			if (input.token) await secrets.set(`provider-${id}`, input.token);
 			await save();
 		}),
+		saveSize: (input) => serial(async () => {
+			const size = sizeEntry(input);
+			state.sizes = state.sizes.filter((existing) => existing.id !== size.id).concat(size);
+			await save();
+		}),
+		removeSize: (id) => serial(async () => {
+			if (id === state.defaultSize) throw new Error("Choose another default size first");
+			if (state.rows.some((row) => row.state !== "deleted" && sizeOf(row).id === id)) throw new Error("A sandbox still uses this size");
+			state.sizes = state.sizes.filter((size) => size.id !== id);
+			await save();
+		}),
+		setDefaultSize: (id) => serial(async () => {
+			if (!state.sizes.some((size) => size.id === id)) throw new Error("Unknown sandbox size");
+			state.defaultSize = id;
+			await save();
+		}),
 		/** What the driver is doing for a sandbox that is being prepared; null when it cannot say. */
 		progress: async (id) => {
 			const row = state.rows.find((r) => r.id === id);
@@ -16205,6 +16263,11 @@ async function createController({ directory, secrets, source, changed = () => {}
 				name: `t3-${state.owner.slice(0, 8)}-${p.id}-${id}`,
 				profile: p.id,
 				title: String(input.title ?? "Sandbox").slice(0, 150),
+				size: [
+					input.size,
+					(await environment(input.repository)).size,
+					state.defaultSize
+				].find((id) => state.sizes.some((size) => size.id === id)),
 				...input.projectTitle ? { projectTitle: String(input.projectTitle).slice(0, 150) } : {},
 				...input.autoTitle === true ? { autoTitle: true } : {},
 				hourlyRate: p.hourlyRate,
@@ -16253,6 +16316,18 @@ async function createController({ directory, secrets, source, changed = () => {}
 				if (!Number.isFinite(minutes) || minutes < 1 || minutes > 10080) throw new Error("Idle stop must be between 1 minute and 7 days");
 				row.idleMinutes = minutes;
 				row.lastActivity = now();
+			} else if (action === "size") {
+				const size = state.sizes.find((candidate) => candidate.id === input.size);
+				if (!size) throw new Error("Unknown sandbox size");
+				if (row.ref && row.state !== "deleted") {
+					const d = await getDriver(row);
+					if (!d.capabilities.resize || !d.resize) throw new Error("This sandbox's provider cannot change the size of an existing sandbox");
+					await d.resize(row.ref, {
+						cpus: size.cpus,
+						memoryGb: size.memoryGb
+					});
+				}
+				row.size = size.id;
 			} else if (action === "pin") row.pinned = input.pinned === true;
 			else if ([
 				"running",
@@ -16455,7 +16530,8 @@ function repositoryKey(remote) {
 const empty = Object.freeze({
 	setup: "",
 	start: "",
-	env: ""
+	env: "",
+	size: ""
 });
 /**
 * One environment per repository: a setup script (run once, then snapshotted by
@@ -16568,8 +16644,9 @@ function launchSteps(row, live = null) {
 }
 const span = (minutes) => minutes >= 120 ? `${Math.round(minutes / 60)} h` : minutes >= 60 ? "1 h" : `${minutes} min`;
 /** The sandbox's row on its thread: state, when it will stop, and the controls for both. */
-function sandboxStatus(row, policy, time) {
+function sandboxStatus(row, { policy, sizes, defaultSize }, time) {
 	const mine = effective(policy, row);
+	const size = sizes.find((candidate) => candidate.id === row.size) ?? sizes.find((candidate) => candidate.id === defaultSize);
 	const next = outlook(row, time, mine);
 	const left = next ? span(Math.max(1, Math.ceil((next.at - time) / 6e4))) : null;
 	const label = !next ? `Sandbox ${row.state}` : next.reason === "idle" ? `Sandbox idle · stops in ${left}` : next.reason === "waiting" ? `Sandbox waiting for you · stops in ${left}` : next.reason === "settled" ? `Sandbox settled · stops in ${left}` : `Sandbox kept awake for ${left}`;
@@ -16581,23 +16658,37 @@ function sandboxStatus(row, policy, time) {
 		tone: tone(row.state),
 		label,
 		detail: row.error ?? `Stops after ${span(mine.idleMinutes)} without activity, or once its threads are settled. Using the thread starts it again.`,
-		actions: row.state === "deleted" ? [] : [{
-			...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
-				id: row.id,
-				state: row.state === "stopped" ? "running" : "stopped"
-			}),
-			...row.state === "stopped" ? {} : { confirm: "Stop the sandbox after retaining its thread history?" }
-		}, {
-			...action("idle", "Idle stop", "idle", { id: row.id }),
-			choice: {
-				name: "minutes",
-				value: String(mine.idleMinutes),
-				options: options.map((minutes) => ({
-					label: span(minutes),
-					value: String(minutes)
-				}))
+		actions: row.state === "deleted" ? [] : [
+			{
+				...action("state", row.state === "stopped" ? "Resume" : "Stop", "state", {
+					id: row.id,
+					state: row.state === "stopped" ? "running" : "stopped"
+				}),
+				...row.state === "stopped" ? {} : { confirm: "Stop the sandbox after retaining its thread history?" }
+			},
+			{
+				...action("idle", "Idle stop", "idle", { id: row.id }),
+				choice: {
+					name: "minutes",
+					value: String(mine.idleMinutes),
+					options: options.map((minutes) => ({
+						label: span(minutes),
+						value: String(minutes)
+					}))
+				}
+			},
+			{
+				...action("size", "Size", "size", { id: row.id }),
+				choice: {
+					name: "size",
+					value: size.id,
+					options: sizes.map((candidate) => ({
+						label: sizeLabel(candidate),
+						value: candidate.id
+					}))
+				}
 			}
-		}]
+		]
 	};
 }
 const minutesAgo = (time, at) => `${Math.max(0, Math.round((time - at) / 6e4))} min ago`;
@@ -16626,6 +16717,36 @@ function settings(controller) {
 				kind: "text",
 				text: "Each sandbox runs its own T3 environment. Use an image or Boat snapshot containing this plugin host build and your chosen agent tools. Start a sandbox here, then pair to open its thread. Docker is reachable from this computer only; use a provider HTTPS URL or a tailnet URL for your phone."
 			},
+			{
+				id: "sizes-about",
+				kind: "text",
+				text: "Sizes are the CPU and memory presets a sandbox can run with. New sandboxes use the default unless the project's sandbox environment picks another; a running sandbox can be switched from its thread's panel."
+			},
+			{
+				id: "sizes",
+				kind: "table",
+				columns: [
+					"Size",
+					"CPU cores",
+					"Memory",
+					"Default"
+				],
+				rows: state.sizes.map((size) => ({
+					id: size.id,
+					cells: [
+						size.id,
+						String(size.cpus),
+						`${size.memoryGb} GB`,
+						size.id === state.defaultSize ? "Default" : ""
+					],
+					actions: size.id === state.defaultSize ? [] : [action("default", "Make default", "size-default", { id: size.id }), action("delete", "Delete", "size-delete", { id: size.id })]
+				}))
+			},
+			form("size", "Save size", "size-save", [
+				field("id", "Name (a new name adds a size, an existing one changes it)"),
+				field("cpus", "CPU cores", "number", 4),
+				field("memoryGb", "Memory (GB)", "number", 16)
+			]),
 			{
 				id: "resources",
 				kind: "table",
@@ -16934,7 +17055,10 @@ var plugin_default = {
 				descriptor("launch", "Start a sandboxed project thread", (input) => mutate(() => launchSandbox(controller, input))),
 				descriptor("auto-launch", "Start a new chat in its own sandbox", (input) => mutate(() => autoLaunch(controller, input))),
 				descriptor("environment-save", "Save sandbox environment", async (input) => {
-					await environments.set(await projectRemote(input.projectId), input);
+					await environments.set(await projectRemote(input.projectId), {
+						...input,
+						size: input.size === "default" ? "" : input.size
+					});
 					notify();
 					return null;
 				}),
@@ -16962,6 +17086,10 @@ var plugin_default = {
 					agent: true,
 					permission: "orchestration:read"
 				}),
+				descriptor("size", "Change a sandbox's CPU and memory", (input) => mutate(() => controller.action(input.id, "size", input))),
+				descriptor("size-save", "Save a sandbox size", (input) => controller.saveSize(input)),
+				descriptor("size-delete", "Delete a sandbox size", (input) => controller.removeSize(input.id)),
+				descriptor("size-default", "Set the default sandbox size", (input) => controller.setDefaultSize(input.id)),
 				descriptor("idle", "Set how long this sandbox may sit idle", (input) => mutate(() => controller.action(input.id, "idle", input))),
 				descriptor("state", "Stop or resume sandbox", (input) => mutate(() => controller.action(input.id, input.state))),
 				descriptor("awake", "Keep sandbox awake or clear", (input) => mutate(() => controller.action(input.id, "keep-awake", input)), { agent: true }),
@@ -17086,7 +17214,7 @@ var plugin_default = {
 					permission: "orchestration:read",
 					read: () => succeed$1({
 						title: "Managed sandboxes",
-						blocks: controller.snapshot().rows.filter((row) => row.environmentId).slice(-100).map((row) => sandboxStatus(row, controller.snapshot().policy, Date.now()))
+						blocks: controller.snapshot().rows.filter((row) => row.environmentId).slice(-100).map((row) => sandboxStatus(row, controller.snapshot(), Date.now()))
 					})
 				},
 				{
@@ -17110,6 +17238,7 @@ var plugin_default = {
 							};
 						}
 						const environment = await environments.get(repository);
+						const { sizes, defaultSize } = controller.snapshot();
 						const snapshot = (await controller.environmentStatus({
 							repository,
 							...environment
@@ -17125,7 +17254,20 @@ var plugin_default = {
 								form("environment", "Save environment", "environment-save", [
 									field("setup", "Setup script (bash, run once from the repository root)", "multiline", environment.setup),
 									field("start", "Start script (bash, run on every sandbox start)", "multiline", environment.start),
-									field("env", "Environment variables (one KEY=VALUE per line)", "multiline", environment.env)
+									field("env", "Environment variables (one KEY=VALUE per line)", "multiline", environment.env),
+									{
+										name: "size",
+										label: "Size of new sandboxes",
+										kind: "select",
+										value: sizes.some((size) => size.id === environment.size) ? environment.size : "default",
+										options: [{
+											label: `Default (${sizeLabel(sizes.find((size) => size.id === defaultSize))})`,
+											value: "default"
+										}, ...sizes.map((size) => ({
+											label: sizeLabel(size),
+											value: size.id
+										}))]
+									}
 								], { projectId: String(input.projectId) }),
 								{
 									id: "snapshot",

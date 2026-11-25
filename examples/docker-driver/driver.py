@@ -20,7 +20,8 @@ built checkout. The start script runs on every sandbox start.
 
 Configuration (environment variables of the T3 server that runs the plugin):
   SANDBOX_IMAGE          image to start sandboxes from (default t3-sandbox:current)
-  SANDBOX_RUN_FLAGS      extra `docker run` flags (default: 4 CPUs, 16 GB, 4096 PIDs)
+  SANDBOX_RUN_FLAGS      extra `docker run` flags (default: 4096 PIDs, 2 GB /dev/shm);
+                         CPU and memory come from the size the plugin passes (capability `resize`)
   SANDBOX_ENV_FILE       env file passed to every sandbox (model keys, tokens); optional
   SANDBOX_TAILNET_HOST   MagicDNS name of this host; unset keeps sandboxes on loopback
   SANDBOX_STATE_DIR      lock and log directory (default ~/.local/state/t3-sandbox-driver)
@@ -38,6 +39,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 STATE = Path(os.environ.get("SANDBOX_STATE_DIR", Path.home() / ".local/state/t3-sandbox-driver"))
@@ -50,9 +52,8 @@ IMAGE = os.environ.get("SANDBOX_IMAGE", "t3-sandbox:current")
 LABEL = "t3-sandbox"
 PORT_LABEL = "t3-sandbox.port"
 PORTS = range(21000, 21200)
-RUN_FLAGS = shlex.split(
-    os.environ.get("SANDBOX_RUN_FLAGS", "--cpus 4 --memory 16g --pids-limit 4096 --shm-size 2g")
-) + (["--env-file", ENV_FILE] if ENV_FILE else [])
+DEFAULT_SIZE = {"cpus": 4, "memoryGb": 16}
+RUN_FLAGS = shlex.split(os.environ.get("SANDBOX_RUN_FLAGS", "--pids-limit 4096 --shm-size 2g")) + (["--env-file", ENV_FILE] if ENV_FILE else [])
 GUEST_PORT = 3773
 SNAPSHOT_REPOSITORY = "t3-sandbox-env"
 SNAPSHOT_HASH_LABEL = "t3-sandbox.env.hash"
@@ -61,6 +62,7 @@ SNAPSHOT_USED_LABEL = "t3-sandbox.env.snapshot"
 SNAPSHOT_MAX_AGE = datetime.timedelta(days=7)
 SETUP_TIMEOUT = 45 * 60
 STATE_DIR = "/var/lib/t3-sandbox"
+PROGRESS = STATE / "progress"
 
 
 def log(message: str) -> None:
@@ -164,6 +166,16 @@ def environment_variables(environment: dict) -> list[str]:
     return lines
 
 
+def size_flags(size: dict | None) -> list[str]:
+    """CPU and memory limits of a sandbox; memory and swap are capped together (no swap)."""
+    size = {**DEFAULT_SIZE, **(size or {})}
+    cpus, memory = float(size["cpus"]), float(size["memoryGb"])
+    if not 0.5 <= cpus <= 512 or not 1 <= memory <= 4096:
+        raise RuntimeError("sandbox size out of range")
+    megabytes = int(memory * 1024)
+    return ["--cpus", f"{cpus:g}", "--memory", f"{megabytes}m", "--memory-swap", f"{megabytes}m"]
+
+
 def create(spec: dict) -> dict:
     name = spec["name"]
     environment = spec.get("environment") or {}
@@ -191,6 +203,7 @@ def create(spec: dict) -> dict:
                 "--label", f"{PORT_LABEL}={port}",
                 "--label", f"{SNAPSHOT_USED_LABEL}={1 if snapshot else 0}",
                 "--publish", f"127.0.0.1:{port}:{GUEST_PORT}",
+                *size_flags(spec.get("size")),
                 *RUN_FLAGS,
                 "--env-file", extra.name,
                 snapshot or IMAGE,
@@ -238,6 +251,35 @@ def secret_keys(environment: dict) -> set[str]:
     return keys
 
 
+def phase(info: dict, text: str | None) -> None:
+    """Say what `prepare` is doing right now; `progress` reports it to the waiting user."""
+    path = PROGRESS / (info["Name"].lstrip("/") + ".json")
+    try:
+        if text is None:
+            path.unlink(missing_ok=True)
+        else:
+            PROGRESS.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"phase": text, "since": time.time()}))
+    except OSError:
+        pass
+
+
+def progress(ref: str) -> dict:
+    info = require(ref)
+    try:
+        current = json.loads((PROGRESS / (info["Name"].lstrip("/") + ".json")).read_text())
+    except (OSError, ValueError):
+        return {"phase": None, "seconds": 0, "log": ""}
+    log_tail = ""
+    if "setup" in current["phase"] and info["State"]["Running"] and not info["State"]["Paused"]:
+        # Progress bars redraw with carriage returns; keep what each line ended up showing.
+        raw = run("docker", "exec", info["Id"], "tail", "-c", "6000", "/var/log/sandbox-setup.log", check=False)
+        lines = [line.split("\r")[-1].rstrip() for line in raw.splitlines()]
+        log_tail = "\n".join(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)[:200] for line in lines if line.strip())
+        log_tail = "\n".join(log_tail.splitlines()[-12:])
+    return {"phase": current["phase"], "seconds": int(time.time() - current["since"]), "log": log_tail}
+
+
 def prepare(ref: str, spec: dict) -> dict:
     """Check the repository out, run the environment's setup once, start its services.
 
@@ -251,6 +293,7 @@ def prepare(ref: str, spec: dict) -> dict:
     workspace = f"/home/user/{repository_name(repository)}"
     marker = f"{STATE_DIR}/checkout-{info['Name'].lstrip('/')}"
     q = shlex.quote
+    phase(info, "Checking out repository")
     guest(info, f"""set -eu
 mkdir -p {STATE_DIR}
 if [ ! -e {q(marker)} ]; then
@@ -272,6 +315,7 @@ fi""", timeout=900)
             outcome = done
         else:
             write_guest(info, f"{STATE_DIR}/setup.sh", setup + "\n")
+            phase(info, "Running setup script")
             try:
                 guest(info, f"cd {q(workspace)} && bash {STATE_DIR}/setup.sh > /var/log/sandbox-setup.log 2>&1",
                       timeout=SETUP_TIMEOUT)
@@ -280,16 +324,25 @@ fi""", timeout=900)
                 outcome = "failed"
             log(f"setup {outcome} in {info['Name'].lstrip('/')}")
             if outcome == "ok":
+                phase(info, "Saving snapshot")
                 guest(info, "sync")
-                commit_snapshot(info, {**environment, "repository": repository})
+                # A failed snapshot only costs the next sandbox a setup run; this one is ready.
+                try:
+                    with LOCK.open("w") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        commit_snapshot(info, {**environment, "repository": repository})
+                except RuntimeError as error:
+                    log(f"snapshot failed for {info['Name'].lstrip('/')}: {error}")
             # Written after the commit: a snapshot must not claim its sandboxes ran setup.
             guest(info, f"printf %s {outcome} > {STATE_DIR}/setup-status")
 
     start = (environment.get("start") or "").strip()
+    phase(info, "Starting services" if start else None)
     if start:
         write_guest(info, f"{STATE_DIR}/start.sh", start + "\n")
         guest(info, f"cd {q(workspace)} && setsid nohup bash {STATE_DIR}/start.sh "
                     f"> /var/log/sandbox-start.log 2>&1 < /dev/null &")
+    phase(info, None)
     return {"workspace": workspace, "setup": outcome}
 
 
@@ -352,6 +405,12 @@ def handle(operation: str, args: list):
         return None
     if operation == "prepare":
         return prepare(args[0], args[1])
+    if operation == "progress":
+        return progress(args[0])
+    if operation == "resize":
+        # Takes effect at once on a running sandbox and sticks across stop and start.
+        run("docker", "update", *size_flags(args[1]), require(args[0])["Id"])
+        return None
     if operation == "environment":
         return environment_status(args[0])
     if operation == "expose":

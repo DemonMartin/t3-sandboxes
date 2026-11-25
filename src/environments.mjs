@@ -14,7 +14,7 @@ export function repositoryKey(remote) {
     .toLowerCase();
 }
 
-const empty = Object.freeze({ setup: "", start: "", env: "" });
+const empty = Object.freeze({ setup: "", start: "", env: "", size: "" });
 
 /**
  * One environment per repository: a setup script (run once, then snapshotted by
