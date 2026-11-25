@@ -2,7 +2,7 @@ import { appendFile, cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, w
 import { watch } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 // node_modules/effect/dist/Pipeable.js
@@ -15128,6 +15128,14 @@ function safeUrl(value) {
 	if (!["https:", "http:"].includes(u.protocol) || u.username || u.password || u.search || u.hash) throw new Error("Use an HTTP(S) origin without credentials");
 	return u.origin;
 }
+/**
+* A file name for a thread's export. Thread ids can be long (a delegated task's id embeds its
+* parent's), and their hex form then exceeds the 255-byte limit of a file name.
+*/
+function threadFileKey(threadId) {
+	const hex = Buffer.from(threadId).toString("hex");
+	return hex.length <= 160 ? hex : `sha256-${createHash("sha256").update(threadId).digest("hex")}`;
+}
 // src/drivers.mjs
 async function transfer(run, ref, path, content, kind) {
 	const dir = await mkdtemp(join(tmpdir(), "sandbox-upload-"));
@@ -15825,7 +15833,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 		const threads = await g.threads();
 		for (const thread of threads) {
 			const transcript = await g.transcript(thread.threadId);
-			await atomic(join(directory, "transcripts", row.id, `${Buffer.from(thread.threadId).toString("hex")}.json`), transcript);
+			await atomic(join(directory, "transcripts", row.id, `${threadFileKey(thread.threadId)}.json`), transcript);
 		}
 		try {
 			row.rehomed = await preserve(row, threads);
@@ -16783,7 +16791,7 @@ var plugin_default = {
 						const threads = await new Guest("http://127.0.0.1:3773", (await readFile(join(context.dataDirectory, "controller-token"), "utf8")).trim()).threads();
 						for (const thread of threads.filter((t) => t.relationshipToParent !== "subagent")) await runPromise(context.threads.export({
 							threadId: thread.threadId,
-							file: join(context.dataDirectory, `pause-${Buffer.from(thread.threadId).toString("hex")}.json`)
+							file: join(context.dataDirectory, `pause-${threadFileKey(thread.threadId)}.json`)
 						}));
 						return null;
 					}, {

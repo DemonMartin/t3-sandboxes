@@ -1,7 +1,7 @@
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
-import { atomic, safeUrl, quote } from "./io.mjs";
+import { atomic, safeUrl, quote, threadFileKey } from "./io.mjs";
 import { driver, bootstrap, pairingScript } from "./drivers.mjs";
 import { Guest } from "./mcp.mjs";
 import { policy, decide, deadline, effective, idleChoices } from "./policy.mjs";
@@ -145,12 +145,7 @@ export async function createController({
     for (const thread of threads) {
       const transcript = await g.transcript(thread.threadId);
       await atomic(
-        join(
-          directory,
-          "transcripts",
-          row.id,
-          `${Buffer.from(thread.threadId).toString("hex")}.json`,
-        ),
+        join(directory, "transcripts", row.id, `${threadFileKey(thread.threadId)}.json`),
         transcript,
       );
     }

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
 import { createController } from "./controller.mjs";
+import { threadFileKey } from "./io.mjs";
 import { effective, idleChoices, outlook, tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
 import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
@@ -381,7 +382,7 @@ export default {
                       threadId: thread.threadId,
                       file: join(
                         context.dataDirectory,
-                        `pause-${Buffer.from(thread.threadId).toString("hex")}.json`,
+                        `pause-${threadFileKey(thread.threadId)}.json`,
                       ),
                     }),
                   );

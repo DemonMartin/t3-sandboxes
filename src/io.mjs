@@ -1,6 +1,6 @@
 import { open, rename, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 export async function atomic(file, value) {
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -56,4 +56,12 @@ export function safeUrl(value) {
   if (!["https:", "http:"].includes(u.protocol) || u.username || u.password || u.search || u.hash)
     throw new Error("Use an HTTP(S) origin without credentials");
   return u.origin;
+}
+/**
+ * A file name for a thread's export. Thread ids can be long (a delegated task's id embeds its
+ * parent's), and their hex form then exceeds the 255-byte limit of a file name.
+ */
+export function threadFileKey(threadId) {
+  const hex = Buffer.from(threadId).toString("hex");
+  return hex.length <= 160 ? hex : `sha256-${createHash("sha256").update(threadId).digest("hex")}`;
 }

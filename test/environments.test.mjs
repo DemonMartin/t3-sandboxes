@@ -68,7 +68,13 @@ test("a sandbox can have its own idle window, and says when it will stop", async
   const { decide, effective, outlook } = await import("../src/policy.mjs");
   const minute = 60000;
   const p = policy({ idleMinutes: 10, continuousMinutes: 720 });
-  const row = { desired: "running", state: "running", startedAt: 0, lastActivity: 0, idleMinutes: 1440 };
+  const row = {
+    desired: "running",
+    state: "running",
+    startedAt: 0,
+    lastActivity: 0,
+    idleMinutes: 1440,
+  };
   const idle = { active: false, waiting: false, closed: false, lastActivity: 0, threads: [{}] };
   const mine = effective(p, row);
   assert.equal(mine.idleMinutes, 1440);
@@ -80,4 +86,15 @@ test("a sandbox can have its own idle window, and says when it will stop", async
     at: 1440 * minute,
   });
   assert.equal(outlook({ ...row, activity: { ...idle, active: true } }, minute, mine), null);
+});
+
+test("a long thread id still gets a file name the filesystem accepts", async () => {
+  const { threadFileKey } = await import("../src/io.mjs");
+  const short = "mcp:3a822ea1-d1bf-46a5-9187-2217a5279701";
+  assert.equal(threadFileKey(short), Buffer.from(short).toString("hex"));
+  const long = `thread:delegated-task:${"command%3Amcp%3A2d77f396-858e-451c-8c5e-c57ea8b8ec69%3Adelegate-task%3A".repeat(2)}`;
+  const key = threadFileKey(long);
+  assert.match(key, /^sha256-[a-f0-9]{64}$/);
+  assert.ok(`${key}.json.${"x".repeat(36)}`.length < 255);
+  assert.notEqual(key, threadFileKey(long + "b"));
 });
