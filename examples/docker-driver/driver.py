@@ -331,7 +331,10 @@ def handle(operation: str, args: list):
         serve(port_of(info))
         return None
     if operation == "stop":
-        run("docker", "stop", require(args[0])["Id"])
+        info = require(args[0])
+        run("docker", "stop", info["Id"])
+        # A stopped sandbox has no address on the tailnet; `start` serves it again.
+        unserve(port_of(info))
         return None
     if operation == "remove":
         info = inspect(args[0])
