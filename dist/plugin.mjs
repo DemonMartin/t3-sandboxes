@@ -15368,7 +15368,9 @@ fi`}
 cd ${q(cwd ?? row.workspace ?? root + "/repo")}
 # A dedicated image supplies the same plugin host build as the controller.
 ${quote(profile.t3Command ?? "t3")} --version >/dev/null
-if [ ! -f ${root}/server.pid ] || ! kill -0 "$(cat ${root}/server.pid)" 2>/dev/null; then
+# A pid saved before the machine restarted can be another process now; only the server counts.
+server_pid="$(cat ${root}/server.pid 2>/dev/null || true)"
+if [ -z "$server_pid" ] || ! cat "/proc/$server_pid/cmdline" 2>/dev/null | tr '\\0' ' ' | grep -q -- "serve --base-dir ${root}/home "; then
   T3_REHOME_TRANSFER_KEY="$(node -p 'JSON.parse(require("fs").readFileSync("/home/user/t3-sandbox/home/plugins-guest.json","utf8")).key')" nohup ${quote(profile.t3Command ?? "t3")} serve --base-dir ${root}/home --host 0.0.0.0 --port 3773 --no-browser > ${root}/server.log 2>&1 < /dev/null &
   echo $! > ${root}/server.pid
 fi
