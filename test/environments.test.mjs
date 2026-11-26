@@ -44,7 +44,11 @@ test("auto launch declines when switched off and refuses to fall back silently w
   assert.equal(await autoLaunch(controller(true, []), input), null);
   await assert.rejects(
     autoLaunch(controller(true), { ...input, hasAttachments: true }),
-    /text-only/,
+    /cannot start from the context/,
+  );
+  await assert.rejects(
+    autoLaunch(controller(true), { ...input, attachments: [{ type: "file", name: "a" }] }),
+    /could not be read/,
   );
   await assert.rejects(autoLaunch(controller(true), { ...input, message: " " }), /first message/);
   await assert.rejects(

@@ -14,6 +14,7 @@ import { threadFileKey } from "./io.mjs";
 import { effective, idleChoices, outlook, tone } from "./policy.mjs";
 import { Guest } from "./mcp.mjs";
 import { autoLaunch, launchProject, launchSandbox } from "./launch.mjs";
+import { stageAttachments, sweepAttachments } from "./attachments.mjs";
 import { createEnvironments } from "./environments.mjs";
 import { sizeChoices, sizeLabel, sizeName, sizeSpecs } from "./sizes.mjs";
 class PluginError extends Schema.TaggedError()("PluginError", {
@@ -508,6 +509,8 @@ export default {
       const environments = yield* call("environments", () =>
         createEnvironments(context.dataDirectory),
       );
+      const attachmentsDirectory = join(context.dataDirectory, "attachments");
+      yield* call("attachments", () => sweepAttachments(attachmentsDirectory));
       const projectRemote = async (projectId) => {
         const project = await Effect.runPromise(context.projects.describe(String(projectId)));
         if (!project.remoteUrl) throw new Error("This project has no Git remote.");
@@ -622,8 +625,26 @@ export default {
               ],
             };
           }),
+          // The host shows a failed command without its reason, so a client that says it reads
+          // notices gets the refusal as one. Any other client must see a failure: it would take
+          // an answer it does not know as leave to run the message on this machine.
           descriptor("auto-launch", "Start a new chat in its own sandbox", (input) =>
-            mutate(() => autoLaunch(controller, input)),
+            mutate(() =>
+              autoLaunch(controller, input, async (requestId, attachments) =>
+                stageAttachments({
+                  directory: join(attachmentsDirectory, requestId),
+                  base: await Effect.runPromise(context.httpBaseUrl),
+                  attachments,
+                }),
+              ),
+            ).catch((error) => {
+              if (input.notices !== true) throw error;
+              return {
+                $t3: "notice",
+                tone: "danger",
+                text: String(error?.message || "The sandbox could not be started.").slice(0, 500),
+              };
+            }),
           ),
           descriptor("environment-save", "Save sandbox environment", async (input) => {
             await environments.set(await projectRemote(input.projectId), {

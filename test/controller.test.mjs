@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createController } from "../src/controller.mjs";
@@ -18,6 +18,7 @@ async function fixture(t) {
     failCreate = false,
     failLaunch = false;
   const launches = new Map();
+  const uploads = [];
   let failBootstrap = false,
     safeWork = false;
   let activity = { active: true, waiting: false, closed: false, lastActivity: time };
@@ -69,8 +70,11 @@ async function fixture(t) {
         }
         return { threadId: "thread" };
       }
+      if (name === "t3_attachment_prepare_upload")
+        return { attachmentId: `pending-${input.upload.name}`, relativeUrl: "/upload" };
       return name === "t3_project_list" ? { projects: [] } : { id: "project" };
     },
+    upload: async (location, bytes) => uploads.push([location, bytes.toString()]),
     activity: async () => activity,
   };
   const options = {
@@ -102,6 +106,7 @@ async function fixture(t) {
     },
     create: (input = {}) => controller.create({ ...spec, ...input }),
     launches,
+    uploads,
     failBootstrap: () => {
       failBootstrap = true;
     },
@@ -146,6 +151,22 @@ test("idempotent provisioning survives an uncertain reply and controller restart
   await f.tick();
   assert.equal(f.row().state, "running");
   assert.equal(f.counts().creates, 1);
+});
+test("a first message's attachments reach the sandbox before its thread starts", async (t) => {
+  const f = await fixture(t);
+  const staged = join(await mkdtemp(join(tmpdir(), "staged-")), "request");
+  await mkdir(staged);
+  await writeFile(join(staged, "0"), "hello");
+  const file = { type: "file", name: "trace.har", mimeType: "application/json", sizeBytes: 5 };
+  const id = await f.create({
+    message: "look at this",
+    attachments: [{ ...file, path: join(staged, "0") }],
+  });
+  await f.tick();
+  assert.deepEqual(f.uploads, [["/upload", "hello"]]);
+  assert.deepEqual(f.launches.get(id).attachments, [{ ...file, id: "pending-trace.har" }]);
+  assert.equal(f.row().attachments, undefined);
+  await assert.rejects(readFile(join(staged, "0")), /ENOENT/);
 });
 test("idle stop exports transcript, resume keeps identity, explicit deletion requires consent", async (t) => {
   const f = await fixture(t);

@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15416,6 +15416,16 @@ var Guest = class {
 		if (!message || message.error) throw new Error("Guest RPC failed");
 		return message.result;
 	}
+	/** POSTs a file's bytes to an upload URL this server issued (`t3_attachment_prepare_upload`). */
+	async upload(location, bytes, mimeType) {
+		const response = await this.fetcher(new URL(location, this.url), {
+			method: "POST",
+			headers: { "Content-Type": mimeType },
+			body: bytes,
+			signal: AbortSignal.timeout(12e4)
+		});
+		if (!response.ok) throw new Error(`Guest upload failed (${response.status})`);
+	}
 	async call(name, args = {}) {
 		if (!this.initialized) {
 			await this.rpc("initialize", {
@@ -15786,6 +15796,85 @@ const sizeChoices = (sizes) => ({
 		input: {}
 	}
 });
+// src/attachments.mjs
+const MAX_COUNT = 8;
+const MAX_BYTES = 52428800;
+/**
+* The images and files a first message carries: what each is, and a URL on the controller its
+* bytes can be read from. Anything malformed is refused instead of starting without it.
+*/
+function attachmentRequests(value) {
+	if (value === void 0 || value === null) return [];
+	if (!Array.isArray(value) || value.length > MAX_COUNT) throw new Error(`A first message can carry up to ${MAX_COUNT} attachments.`);
+	return value.map((item) => {
+		if (typeof item !== "object" || item === null || !["image", "file"].includes(item.type) || typeof item.name !== "string" || !item.name.trim() || item.name.length > 255 || typeof item.mimeType !== "string" || !item.mimeType || item.mimeType.length > 100 || !Number.isInteger(item.sizeBytes) || item.sizeBytes < 1 || typeof item.url !== "string" || !/^\/(?!\/)/.test(item.url)) throw new Error("An attachment could not be read. Attach it again.");
+		if (item.sizeBytes > MAX_BYTES) throw new Error(`${item.name} is too large to attach (50 MB at most).`);
+		return {
+			type: item.type,
+			name: item.name,
+			mimeType: item.mimeType,
+			sizeBytes: item.sizeBytes,
+			url: item.url
+		};
+	});
+}
+/**
+* Copies a launch's attachments from the controller into `directory`. The client's uploads are
+* its own to delete, and a sandbox can take minutes to come up, so the launch keeps the bytes.
+*/
+async function stageAttachments({ directory, base, attachments, fetcher = fetch }) {
+	if (!attachments.length) return [];
+	const origin = new URL(base).origin;
+	await mkdir(directory, {
+		recursive: true,
+		mode: 448
+	});
+	try {
+		return await Promise.all(attachments.map(async ({ url, ...attachment }, index) => {
+			const target = new URL(url, base);
+			if (target.origin !== origin) throw new Error("An attachment could not be read.");
+			const response = await fetcher(target, { signal: AbortSignal.timeout(12e4) });
+			const bytes = response.ok ? Buffer.from(await response.arrayBuffer()) : null;
+			if (bytes?.length !== attachment.sizeBytes) throw new Error(`${attachment.name} could not be read. Attach it again.`);
+			const path = join(directory, String(index));
+			await writeFile(path, bytes, { mode: 384 });
+			return {
+				...attachment,
+				path
+			};
+		}));
+	} catch (error) {
+		await rm(directory, {
+			recursive: true,
+			force: true
+		});
+		throw error;
+	}
+}
+/** Uploads staged attachments to a sandbox's server; returns what its thread launch refers to. */
+async function uploadAttachments(guest, staged) {
+	const sent = [];
+	for (const { path, ...attachment } of staged) {
+		const prepared = await guest.call("t3_attachment_prepare_upload", { upload: attachment });
+		await guest.upload(prepared.relativeUrl, await readFile(path), attachment.mimeType);
+		sent.push({
+			...attachment,
+			id: prepared.attachmentId
+		});
+	}
+	return sent;
+}
+/** Drops the staged files of launches that never reached their thread. */
+async function sweepAttachments(root, now = Date.now(), maxAge = 864e5) {
+	for (const name of await readdir(root).catch(() => [])) {
+		const directory = join(root, name);
+		const info = await stat(directory).catch(() => null);
+		if (info && now - info.mtimeMs > maxAge) await rm(directory, {
+			recursive: true,
+			force: true
+		});
+	}
+}
 // src/controller.mjs
 const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 async function createController({ directory, secrets, source, changed = () => {}, diagnostic = () => {}, preserve = async () => false, environment = async () => ({}), drivers = driver, guest = (url, token) => new Guest(url, token), now = Date.now }) {
@@ -16111,11 +16200,13 @@ async function createController({ directory, secrets, source, changed = () => {}
 						title: row.projectTitle ?? row.title,
 						workspaceRoot
 					});
+					const attachments = row.message ? await uploadAttachments(g, row.attachments ?? []) : [];
 					row.threadId = (await g.call("t3_thread_launch", {
 						projectId: project.id,
 						title: row.autoTitle ? "New thread" : row.title,
 						...row.autoTitle ? { generateTitle: true } : {},
 						...row.message ? { message: row.message } : {},
+						...attachments.length ? { attachments } : {},
 						...row.modelSelection ? { modelSelection: row.modelSelection } : {},
 						...row.runtimeMode ? { runtimeMode: row.runtimeMode } : {},
 						clientRequestId: row.id,
@@ -16126,6 +16217,11 @@ async function createController({ directory, secrets, source, changed = () => {}
 						}
 					})).threadId;
 					row.message = null;
+					if (row.attachments?.length) await rm(dirname(row.attachments[0].path), {
+						recursive: true,
+						force: true
+					});
+					delete row.attachments;
 					await save();
 				}
 				row.state = "running";
@@ -16343,6 +16439,7 @@ async function createController({ directory, secrets, source, changed = () => {}
 				repository: input.repository,
 				base: input.base,
 				message: input.message ?? null,
+				...input.attachments?.length ? { attachments: input.attachments } : {},
 				modelSelection: input.modelSelection ?? null,
 				runtimeMode: input.runtimeMode ?? null,
 				state: "starting",
@@ -16558,15 +16655,17 @@ const firstLine = (message) => message.trim().split("\n", 1)[0].replace(/\s+/g, 
 /**
 * The first send of a new chat, offered to the plugin before the host sends it locally.
 * Returns null to decline (the chat then runs on this machine); throws when a sandbox was
-* wanted but cannot be started, so the message never silently runs unsandboxed.
+* wanted but cannot be started, so the message never silently runs unsandboxed. `stage` keeps
+* the message's attachments for the launch and returns what the sandbox record holds of them.
 */
-async function autoLaunch(controller, input) {
+async function autoLaunch(controller, input, stage = async () => []) {
 	const { policy, profiles, rows } = controller.snapshot();
 	if (!policy.autoSandbox || !profiles.length) return null;
 	if (!/^[a-f0-9-]{36}$/.test(input.requestId ?? "")) throw new Error("Invalid launch request id");
 	if (!rows.some((row) => row.id === input.requestId)) {
 		if (typeof input.message !== "string" || !input.message.trim()) throw new Error("Write a first message to start the sandbox with.");
-		if (input.hasAttachments) throw new Error("A sandbox starts from a text-only first message. Remove the attachments, or switch Run on to this machine.");
+		if (input.hasAttachments) throw new Error("A sandbox cannot start from the context attached to this message. Remove it (images and files are fine), or switch Run on to this machine.");
+		const attachments = attachmentRequests(input.attachments);
 		const project = await launchProject(input).catch(() => {
 			throw new Error("A sandbox needs a Git project with an origin remote. Switch Run on to this machine to work here.");
 		});
@@ -16581,7 +16680,8 @@ async function autoLaunch(controller, input) {
 			profile: profiles[0].id,
 			title: firstLine(input.message),
 			autoTitle: true,
-			modelSelection
+			modelSelection,
+			attachments: await stage(input.requestId, attachments)
 		});
 	}
 	return {
@@ -17042,6 +17142,8 @@ var plugin_default = {
 			"remove"
 		].map((key) => [key, (...args) => runPromise(context.secrets[key](...args))]));
 		const environments = yield* call("environments", () => createEnvironments(context.dataDirectory));
+		const attachmentsDirectory = join(context.dataDirectory, "attachments");
+		yield* call("attachments", () => sweepAttachments(attachmentsDirectory));
 		const projectRemote = async (projectId) => {
 			const project = await runPromise(context.projects.describe(String(projectId)));
 			if (!project.remoteUrl) throw new Error("This project has no Git remote.");
@@ -17132,7 +17234,18 @@ var plugin_default = {
 						}]
 					};
 				}),
-				descriptor("auto-launch", "Start a new chat in its own sandbox", (input) => mutate(() => autoLaunch(controller, input))),
+				descriptor("auto-launch", "Start a new chat in its own sandbox", (input) => mutate(() => autoLaunch(controller, input, async (requestId, attachments) => stageAttachments({
+					directory: join(attachmentsDirectory, requestId),
+					base: await runPromise(context.httpBaseUrl),
+					attachments
+				}))).catch((error) => {
+					if (input.notices !== true) throw error;
+					return {
+						$t3: "notice",
+						tone: "danger",
+						text: String(error?.message || "The sandbox could not be started.").slice(0, 500)
+					};
+				})),
 				descriptor("environment-save", "Save sandbox environment", async (input) => {
 					await environments.set(await projectRemote(input.projectId), {
 						...input,

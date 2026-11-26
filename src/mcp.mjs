@@ -31,6 +31,16 @@ export class Guest {
     if (!message || message.error) throw new Error("Guest RPC failed");
     return message.result;
   }
+  /** POSTs a file's bytes to an upload URL this server issued (`t3_attachment_prepare_upload`). */
+  async upload(location, bytes, mimeType) {
+    const response = await this.fetcher(new URL(location, this.url), {
+      method: "POST",
+      headers: { "Content-Type": mimeType },
+      body: bytes,
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!response.ok) throw new Error(`Guest upload failed (${response.status})`);
+  }
   async call(name, args = {}) {
     if (!this.initialized) {
       await this.rpc("initialize", {

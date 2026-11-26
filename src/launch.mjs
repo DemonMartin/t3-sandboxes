@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { realpath } from "node:fs/promises";
 import { command } from "./io.mjs";
+import { attachmentRequests } from "./attachments.mjs";
 export async function launchProject(input) {
   if (typeof input.projectDirectory !== "string" || !isAbsolute(input.projectDirectory))
     throw new Error("Select a Git project on the controller first.");
@@ -53,19 +54,22 @@ const firstLine = (message) => message.trim().split("\n", 1)[0].replace(/\s+/g, 
 /**
  * The first send of a new chat, offered to the plugin before the host sends it locally.
  * Returns null to decline (the chat then runs on this machine); throws when a sandbox was
- * wanted but cannot be started, so the message never silently runs unsandboxed.
+ * wanted but cannot be started, so the message never silently runs unsandboxed. `stage` keeps
+ * the message's attachments for the launch and returns what the sandbox record holds of them.
  */
-export async function autoLaunch(controller, input) {
+export async function autoLaunch(controller, input, stage = async () => []) {
   const { policy, profiles, rows } = controller.snapshot();
   if (!policy.autoSandbox || !profiles.length) return null;
   if (!/^[a-f0-9-]{36}$/.test(input.requestId ?? "")) throw new Error("Invalid launch request id");
   if (!rows.some((row) => row.id === input.requestId)) {
     if (typeof input.message !== "string" || !input.message.trim())
       throw new Error("Write a first message to start the sandbox with.");
+    // Images and files travel with the message; context only this machine has cannot.
     if (input.hasAttachments)
       throw new Error(
-        "A sandbox starts from a text-only first message. Remove the attachments, or switch Run on to this machine.",
+        "A sandbox cannot start from the context attached to this message. Remove it (images and files are fine), or switch Run on to this machine.",
       );
+    const attachments = attachmentRequests(input.attachments);
     const project = await launchProject(input).catch(() => {
       throw new Error(
         "A sandbox needs a Git project with an origin remote. Switch Run on to this machine to work here.",
@@ -106,6 +110,7 @@ export async function autoLaunch(controller, input) {
       title: firstLine(input.message),
       autoTitle: true,
       modelSelection,
+      attachments: await stage(input.requestId, attachments),
     });
   }
   return { $t3: "environment-launch", requestId: input.requestId };

@@ -1,5 +1,5 @@
-import { readFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, mkdir, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
 import { atomic, safeUrl, quote, threadFileKey } from "./io.mjs";
 import { driver, bootstrap, pairingScript } from "./drivers.mjs";
@@ -9,6 +9,7 @@ import { usage } from "./billing.mjs";
 import { readQuote, snapshot } from "./pricing.mjs";
 import { workspaceSafetyScript } from "./safety.mjs";
 import { defaultSizes, sizeEntry } from "./sizes.mjs";
+import { uploadAttachments } from "./attachments.mjs";
 const DEFAULT_WORKSPACE = "/home/user/t3-sandbox/repo";
 export async function createController({
   directory,
@@ -376,11 +377,14 @@ export async function createController({
               title: row.projectTitle ?? row.title,
               workspaceRoot,
             }));
+          // The first message's files go to the sandbox's server first; the launch names them.
+          const attachments = row.message ? await uploadAttachments(g, row.attachments ?? []) : [];
           const result = await g.call("t3_thread_launch", {
             projectId: project.id,
             title: row.autoTitle ? "New thread" : row.title,
             ...(row.autoTitle ? { generateTitle: true } : {}),
             ...(row.message ? { message: row.message } : {}),
+            ...(attachments.length ? { attachments } : {}),
             ...(row.modelSelection ? { modelSelection: row.modelSelection } : {}),
             ...(row.runtimeMode ? { runtimeMode: row.runtimeMode } : {}),
             clientRequestId: row.id,
@@ -390,6 +394,9 @@ export async function createController({
           });
           row.threadId = result.threadId;
           row.message = null;
+          if (row.attachments?.length)
+            await rm(dirname(row.attachments[0].path), { recursive: true, force: true });
+          delete row.attachments;
           await save();
         }
         row.state = "running";
@@ -628,6 +635,7 @@ export async function createController({
           repository: input.repository,
           base: input.base,
           message: input.message ?? null,
+          ...(input.attachments?.length ? { attachments: input.attachments } : {}),
           modelSelection: input.modelSelection ?? null,
           runtimeMode: input.runtimeMode ?? null,
           state: "starting",
