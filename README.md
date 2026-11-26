@@ -31,7 +31,7 @@ Everything in the upstream guide below still applies unless this section says ot
 
 ### Requirements
 
-- The T3 Code host from [DemonMartin/t3code](https://github.com/DemonMartin/t3code), branch `agentbox`, on the controller **and** inside the sandbox image (the same build in both). See that repository's README for building it.
+- The T3 Code host from [DemonMartin/t3code](https://github.com/DemonMartin/t3code), branch `agentbox`, on the controller **and** inside the sandbox image (the same build in both). Its `FORK.md` describes building it.
 - Node 24 or later.
 - For the features marked "driver" below: an external driver that implements them. [`examples/docker-driver/driver.py`](examples/docker-driver/driver.py) does, for local Docker.
 
